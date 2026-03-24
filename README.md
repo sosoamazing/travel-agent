@@ -1,8 +1,6 @@
 # 🌍 智能旅行规划助手
 
-基于 **LangChain Agent + Streamlit + MCP + RAG** 的智能旅行规划系统，结合双模型协作（DeepSeek R1 + Qwen3）、知识检索和实时数据查询，为用户提供智能化的旅行方案。
-
-> **架构升级**: 已从 LangGraph 迁移到 **LangChain Agent**，无递归限制，支持复杂多目的地行程规划。
+基于 **LangChain + LangGraph + Streamlit + MCP + RAG** 的智能旅行规划系统，采用 Multi-Agents 架构，结合双模型协作（DeepSeek R1 + Qwen3）、知识检索和实时数据查询，为用户提供智能化的旅行方案。
 
 ## 📋 目录
 
@@ -21,18 +19,19 @@
 
 ## 🎯 项目简介
 
-这是一个智能旅行规划系统，采用 **Streamlit UI + LangChain Agent** 架构，通过自然语言对话为用户生成完整的旅行方案。系统支持简单查询和复杂行程规划两种模式，根据场景复杂度自动选择合适的处理路径。
+这是一个智能旅行规划系统，采用 **Streamlit UI + LangGraph Multi-Agents** 架构，通过自然语言对话为用户生成完整的旅行方案。系统由多个专门的 Agent 协同工作，包括 Planner（规划师）、Executor（执行者）、Summarizer（总结者）和 Feedback Agent（反馈代理），实现高效的任务分解和执行。
 
 ### 主要特性
 
-- **双模式查询**：
-  - 🔍 **简单查询模式**：只需目的地，快速获取景点推荐
-  - 🎯 **完整规划模式**：提供详细信息，生成含交通、住宿、天气、黄历的完整方案
+- **Multi-Agents 架构**：
+  - 🧠 **Planner Agent**：解析用户需求，提取关键信息
+  - 🔧 **Executor Agent**：调用工具执行具体任务
+  - 📝 **Summarizer Agent**：综合信息生成最终方案
+  - 💬 **Feedback Agent**：处理对话反馈和多轮交互
 
 - **双模型协作**：
   - **DeepSeek R1**：处理复杂推理和多目的地路线优化（预算分配、时间安排）
   - **Qwen3**：负责信息提取、工具调用决策和方案生成
-  - 系统根据场景复杂度自动选择 R1 主导或 Qwen3 主导模式
 
 - **实时数据集成** (基于 MCP 协议)：
   - 🚄 12306 火车票查询（自动获取站点代码，查询车次时刻表）
@@ -53,7 +52,7 @@
 ### 1. 智能信息提取
 - 从自然语言对话中提取出发地、目的地、日期、预算等关键信息
 - 支持相对日期（"明天"、"下周"）自动转换
-- 多轮对话上下文保持
+- 多轮对话上下文保持，支持增量信息更新
 
 ### 2. 交通方案对比
 - 自动查询火车票信息（车次、时间、票价）
@@ -77,45 +76,36 @@
 - 生成每日详细行程
 - 计算预算分配（交通、住宿、餐饮、门票）
 
+### 6. 用户画像管理
+- 保存用户偏好和历史数据
+- 支持个性化推荐
+- 聊天历史持久化存储
+
 ---
 
 ## 🏗️ 技术架构
 
-### 后端架构 (`aggentic_RAG`)
+### Multi-Agents 工作流
 
 ```
-LangChain Agent + 预分析层
-├── pre_analyze_query         # 预分析（场景检测、多目的地识别）
-│   ├── simple_query          # 简单查询：只需景点信息
-│   ├── complex_query         # 复杂查询：特殊需求、预算紧张
-│   └── multi_destination     # 多目的地：2个以上城市
-│
-├── [R1主导模式]              # 复杂/多目的地场景
-│   ├── r1_strategy_node      # R1分解行程、制定query_plan
-│   ├── ReAct Loop            # 按query_plan执行工具调用
-│   │   ├── train_query       # 12306查询（自动附带自驾路线）
-│   │   ├── gaode_weather     # 天气查询
-│   │   ├── gaode_hotel       # 酒店搜索
-│   │   ├── lucky_day         # 黄历查询
-│   │   └── flight_query      # 航班查询（条件触发）
-│   ├── r1_optimization       # R1二次优化（仅单目的地）
-│   └── synthesizer_node      # 生成最终方案
-│
-└── [Qwen3主导模式]           # 简单场景
-    ├── ReAct Loop            # Qwen3自主决策调用工具
-    └── synthesizer_node      # 生成最终方案
+用户输入
+   ↓
+[Planner Agent] → 信息提取 + 需求分析
+   ↓
+[Executor Agent] → 工具调用（RAG/12306/高德/黄历）
+   ↓
+[Summarizer Agent] → 方案合成
+   ↓
+[Feedback Agent] → 多轮交互优化
+   ↓
+最终输出
 ```
-
-**关键特性**:
-- ✅ **无递归限制**: 从 LangGraph 迁移到 LangChain Agent，支持任意长度的query_plan
-- ✅ **自动重试**: MCP工具调用失败自动重试2次（SSE连接保护）
-- ✅ **超时保护**: 12306查询90秒超时，防止长时间阻塞
-- ✅ **错误恢复**: 单个工具失败不影响整体流程
 
 ### 核心技术栈
 
 **后端**：
-- **LangChain Agent**: 核心Agent执行引擎（ReAct模式）
+- **LangGraph**: Multi-Agents 工作流编排
+- **LangChain**: Agent 框架和工具集成
 - **Streamlit**: Web UI 界面
 - **ChromaDB**: 向量数据库（存储旅游攻略）
 - **DashScope**: 阿里云模型服务（Qwen3-plus + text-embedding-v3）
@@ -125,6 +115,7 @@ LangChain Agent + 预分析层
   - Gaode Server（地图、天气、酒店）
   - Bazi Server（黄历）
   - Flight Server（航班，可选）
+  - Bing Search Server（搜索，可选）
 
 ---
 
@@ -226,71 +217,68 @@ LangChain Agent + 预分析层
 
 ```bash
 git clone <repository-url>
-cd "agentic RAG"
+cd travel-agent
 ```
 
-### 2. 后端安装
+### 2. 安装依赖
 
-#### 2.1 安装依赖
-
-**推荐方式**（支持开发模式，方便调试）：
-```bash
-cd aggentic_RAG
-pip install -e .
-```
-
-或者使用 requirements.txt：
+进入 multi-agents 目录并安装依赖：
 
 ```bash
+cd multi-agents
 pip install -r requirements.txt
 ```
 
-> **说明**：虽然 `app.py` 会自动添加模块路径，但 `pip install -e .` 能让其他工具脚本（如 `check_mcp_health.py`）正常运行，并支持开发模式下的代码热重载。
+### 3. 配置环境变量
 
-#### 2.2 配置环境变量
-
-在 `aggentic_RAG` 目录下创建 `.env` 文件：
+在 `multi-agents` 目录下创建或编辑 `.env` 文件：
 
 ```bash
 # 模型 API 密钥（必填）
-DEEPSEEK_API_KEY=sk-your-deepseek-api-key-here
-DASHSCOPE_API_KEY=sk-your-dashscope-api-key-here
+DEEPSEEK_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+DASHSCOPE_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
 # LangChain 追踪（可选，用于调试）
 LANGCHAIN_TRACING_V2=false
 
 # MCP 配置文件路径（默认值）
-MCP_CONFIG_PATH=travel_agent/config/servers_config.json
+MCP_CONFIG_PATH=config/servers_config.json
 
 # ChromaDB 向量数据库路径（默认值）
-CHROMA_PERSIST_DIR=./data/travel_vectordb
+CHROMA_PERSIST_DIR=../data/travel_vectordb
 ```
 
-**重要**：将 `sk-your-xxx-key-here` 替换为你从上一步获取的真实 API Key。
+**重要**：将 `sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx` 替换为你获取的真实 API Key。
 
-#### 2.3 配置 MCP 服务器
+### 4. 配置 MCP 服务器
 
-编辑 `travel_agent/config/servers_config.json`：
+编辑 `config/servers_config.json`：
 
 ```json
 {
     "mcp_servers": [
         {
             "name": "12306 Server",
-            "url": "https://your-12306-mcp-server-url/sse"
+            "url": "https://your-12306-mcp-server-url/sse",
+            "description": "火车票查询服务 - 必需",
+            "required": true
         },
         {
             "name": "Gaode Server",
-            "url": "https://your-gaode-mcp-server-url/sse"
+            "url": "https://your-gaode-mcp-server-url/sse",
+            "description": "高德地图服务（路线规划、酒店、天气、POI搜索）- 必需",
+            "required": true
         },
         {
             "name": "bazi Server",
-            "url": "https://your-bazi-mcp-server-url/sse"
+            "url": "https://your-bazi-mcp-server-url/sse",
+            "description": "八字黄历服务（农历、黄历宜忌、出行吉日）- 必需",
+            "required": true
         }
     ],
     "agent": {
         "name": "TravelPlannerAssistant",
-        "instructions": "你是一名专业的旅行规划智能助手。你可以帮助用户通过以下工具进行旅游规划：1) 12306查询 - 查询火车票信息；2) Gaode地图 - 路线规划和导航；3) 八字工具 - 命理信息查询。请根据用户需求调用相应工具，并生成详细的旅行方案。"
+        "instructions": "你是一名专业的旅行规划智能助手..."
     }
 }
 ```
@@ -299,24 +287,16 @@ CHROMA_PERSIST_DIR=./data/travel_vectordb
 - `mcp_servers`：MCP 服务器列表
   - `name`：服务器名称（用于日志）
   - `url`：服务器 SSE 接口地址
-- `agent`：Agent 配置
-  - `name`：Agent 名称
-  - `instructions`：Agent 系统提示词
+  - `required`：是否必需
 
 **必需的 MCP 服务器**：
-- ✅ **12306 Server**：火车票查询（完整规划模式必需）
-- ✅ **Gaode Server**：地图、酒店、天气（完整规划模式必需）
-- ✅ **Bazi Server**：黄历查询（完整规划模式必需）
+- ✅ **12306 Server**：火车票查询
+- ✅ **Gaode Server**：地图、酒店、天气
+- ✅ **Bazi Server**：黄历查询
 
-**可选的 MCP 服务器**：
-- ⭕ **Bing Search Server**：搜索旅游资讯
-- ⭕ **Flight Server**：航班查询
+### 5. 启动应用
 
-将 URL 替换为你获取的真实 MCP 服务器地址。
-
-#### 2.4 启动应用
-
-在项目根目录运行:
+在 multi-agents 目录运行:
 
 ```bash
 streamlit run app.py
@@ -328,32 +308,6 @@ streamlit run app.py
 - 启动成功后，浏览器会自动打开 Streamlit UI
 - 在侧边栏可以查看已加载的工具列表
 - 后台日志会显示 MCP 服务器连接状态
-
-### 3. 使用健康检查工具（可选）
-
-检查所有 MCP 服务器连接状态:
-
-```bash
-python check_mcp_health.py
-```
-
-输出示例:
-```
-🔍 MCP 服务器健康检查
-============================================================
-
-🔧 12306 Server
-   状态: ✅ 正常
-   工具数: 3
-   示例工具: get-tickets, get-stations-code-in-city, ...
-
-🔧 Gaode Server
-   状态: ✅ 正常
-   工具数: 5
-   ...
-
-✅ 所有 MCP 服务器状态正常！
-```
 
 ---
 
@@ -370,8 +324,7 @@ python check_mcp_health.py
 ```
 
 **系统行为**：
-- 只调用 RAG 知识库和高德地图 POI 搜索
-- 不查询火车票、天气、黄历
+- 调用 RAG 知识库和高德地图 POI 搜索
 - 返回景点列表和简要介绍
 
 ### 完整规划模式
@@ -391,15 +344,10 @@ python check_mcp_health.py
 ```
 
 **系统行为**：
-1. 提取关键信息
-2. 查询 RAG 知识库
-3. 查询火车票（12306）
-4. 计算自驾路线（高德地图）
-5. 推荐酒店（高德地图 + 预算过滤）
-6. 查询天气预报（高德地图）
-7. 查询黄历吉日（八字服务器）
-8. 如需复杂优化，调用 DeepSeek R1 分析
-9. 合成完整方案
+1. Planner Agent 提取关键信息
+2. Executor Agent 调用工具（RAG/12306/高德/黄历）
+3. Summarizer Agent 合成完整方案
+4. Feedback Agent 支持多轮对话优化
 
 **输出内容**：
 - 📋 基本信息（路线、日期、天气、黄历）
@@ -413,102 +361,44 @@ python check_mcp_health.py
 
 **DeepSeek R1** 仅在**复杂场景**下才会被调用，以控制成本和提高效率。
 
-#### 什么时候会调用 R1？
-
-系统在信息提取阶段会自动判断是否需要复杂推理，满足以下 **任意一个条件** 就会设置 `needs_deep_analysis=true`：
+满足以下 **任意一个条件** 就会使用 R1：
 
 1. **复杂的多城市路线**
-   - 示例：“上海 → 苏州 → 杭州 → 南京，5天”
+   - 示例："上海 → 苏州 → 杭州 → 南京，5天"
    - 需要：路线优化、时间分配
 
 2. **紧张的预算优化**
-   - 示例：“4人去苏州3天，总预算1500元”（人均375元/天）
+   - 示例："4人去苏州3天，总预算1500元"（人均375元/天）
    - 需要：交通、住宿、餐饮、门票的精细优化
 
 3. **多重冲突的约束条件**
-   - 示例：“带着两个70岁老人和一个5岁孩子，时间只有1天，要去3个景点”
+   - 示例："带着两个70岁老人和一个5岁孩子，时间只有1天，要去3个景点"
    - 需要：平衡老人体力、孩子兴趣、时间限制
 
 4. **复杂的优化问题**
-   - 示例：“最省钱的方案”、“最快到达的路线”、“最多景点的行程”
+   - 示例："最省钱的方案"、"最快到达的路线"、"最多景点的行程"
    - 需要：多目标优化、权衡分析
-
-#### 什么时候不会调用 R1？
-
-大多数普通场景只需要 **Qwen3** 就能处理，**不会调用 R1**：
-
-- ✅ 简单查询：“苏州有什么好玩的？”
-- ✅ 单城市、充裕预算：“上海去苏州2天，预算3000元”
-- ✅ 没有特殊约束：“两个成年人去杭州3天”
-
-#### 如何验证 R1 是否被调用？
-
-查看 Streamlit 后台日志（运行 `streamlit run app.py` 的终端窗口）：
-
-如果看到以下日志，说明 R1 被调用了：
-```
-📊 预分析结果: {..., 'needs_deep_analysis': True, ...}
-🌍 检测到多目的地场景: comma_separated_2
-
-🧠 R1 主导模式: multi_destination
-
-🧠 [r1_analysis] 深度分析调用: 用户计划于...
-  R1分析完成，返回 1771 字符
-```
-
-或者在 Streamlit UI 中看到：
-```
-🌍 检测到多目的地行程，将调用深度路线优化...
-```
-
-#### R1 调用示例
-
-**会调用 R1 的查询**：
-```
-用户：我带2个老人和1个儿童，从北京出发，去苏州、4天，预算2500元，
-     老人不能走太多路，孩子喜欢动物园，给我最省钱的方案。
-
-系统：⚠️ 检测到复杂场景：
-      - 紧张预算（4人4天只有2500元）
-      - 特殊约束（老人体力 + 儿童兴趣）
-      - 优化目标（最省钱）
-      → 调用 DeepSeek R1 进行深度分析...
-```
-
-**不会调用 R1 的查询**：
-```
-用户：我想从上海去苏州玩2天，预算1500元，明天出发。
-
-系统：✅ 普通场景，使用 Qwen3 处理
-      → 直接查询车票、酒店、天气，生成方案
-```
 
 ---
 
-## 🗄️ 数据库管理
+## ️ 数据库管理
 
 本项目使用 **ChromaDB** 作为向量数据库，存储旅游攻略文档。
 
 ### 数据库位置
 
 ```
-aggentic_RAG/data/travel_vectordb/
+data/travel_vectordb/
 ```
 
 ### 导入数据
 
-本项目提供 **两种** 文档导入方式：
-
-#### 方式1：Streamlit UI 上传（推荐）
+通过 Streamlit UI 上传文档：
 
 1. 启动应用：`streamlit run app.py`
-2. 在左侧边栏找到 **"📚 知识库管理"** 区域
-3. 点击 **"上传文件"** 按钮，选择文档
-4. 系统自动完成:
-   - ✅ 文件上传到 `data/travel_docs/`
-   - ✅ 文本分块处理
-   - ✅ 向量化并存入 ChromaDB
-   - ✅ 实时显示处理进度
+2. 在左侧边栏找到 **"📚 旅游攻略文档"** 区域
+3. 点击上传按钮，选择文档
+4. 系统自动完成文本分块和向量化
 
 **支持的格式**：
 - `.txt` - 纯文本
@@ -516,252 +406,76 @@ aggentic_RAG/data/travel_vectordb/
 - `.pdf` - PDF 文档
 - `.csv` - CSV 表格
 
-**优点**：
-- 🎯 简单直观，无需写代码
-- 📊 实时反馈处理状态
-- 🔄 自动去重（基于 UUID）
-
-#### 方式2：命令行批量导入（适合大量文档）
-
-1. 将旅游攻略文档放入 `data/travel_docs/` 目录：
-   ```bash
-   cd aggentic_RAG
-   mkdir -p data/travel_docs
-   # 复制你的文档到 data/travel_docs/
-   ```
-
-2. 打开 Python REPL：
-   ```bash
-   python
-   ```
-
-3. 执行导入脚本：
-   ```python
-   from travel_agent.tools.rag_tool import TravelRAGTool
-   
-   # 创建 RAG 工具实例
-   rag_tool = TravelRAGTool()
-   
-   # 导入数据（自动生成向量）
-   rag_tool.build_knowledge_base(
-       data_dir="./data/travel_docs",
-       force_recreate=False  # False=追加模式，True=重建数据库
-   )
-   
-   print("数据导入完成！")
-   ```
-
-**优点**：
-- 📦 适合批量处理数百上千个文档
-- ⚙️ 支持自定义分块参数
-- 📄 适合脚本化和自动化场景
-
----
-
-### 自定义分块参数（可选）
-
-```python
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-
-# 创建自定义分块器
-text_splitter = RecursiveCharacterTextSplitter(
-    chunk_size=800,        # 每块字符数
-    chunk_overlap=100,     # 重叠字符数
-)
-
-# 应用到 RAG 工具
-rag_tool.text_splitter = text_splitter
-
-# 导入数据
-rag_tool.build_knowledge_base("./data/travel_docs")
-```
-
-### 查询数据
-
-```python
-# 查看数据库统计信息
-stats = rag_tool.get_stats()
-print(f"文档总数: {stats['total_docs']}")
-print(f"数据源: {stats['sources']}")
-
-# 搜索测试
-results = rag_tool.search("苏州园林")
-for result in results:
-    print(result.page_content)
-```
-
-### 删除数据
-
-#### 删除指定文件
-
-```python
-# 删除某个源文件的所有文档
-rag_tool.delete_by_source("data/travel_docs/suzhou_guide.txt")
-print("已删除 suzhou_guide.txt 的所有文档")
-```
-
-#### 重建数据库
-
-```python
-# 清空并重建整个数据库
-rag_tool.build_knowledge_base(
-    data_dir="./data/travel_docs",
-    force_recreate=True  # 强制重建
-)
-```
-
-### 更新数据
-
-```python
-# 追加新文档（自动跳过已存在的文档）
-rag_tool.build_knowledge_base(
-    data_dir="./data/travel_docs",
-    force_recreate=False
-)
-```
-
-### UUID 机制
-
-每个文档块生成稳定的 UUID（基于内容和来源）：
-
-```python
-# UUID 生成规则
-UUID = MD5(f"{source_file}:{chunk_index}:{content[:100]}")
-```
-
-优点：
-- ✅ 自动去重
-- ✅ 精确删除
-- ✅ 支持增量更新
-
 ---
 
 ## 📁 项目结构
 
 ```
-travel-planning-agent/
-├── aggentic_RAG/                 # Python 后端包
-│   ├── travel_agent/             # 主应用代码
-│   │   ├── config/               # 配置文件
-│   │   │   ├── prompts.py        # Prompt 模板（Planner, Synthesizer, R1）
-│   │   │   ├── settings.py       # 全局配置（路径、参数）
-│   │   │   └── servers_config.json  # MCP 服务器配置
-│   │   ├── core/                 # 核心模块
-│   │   │   └── agent_executor.py # Agent执行引擎（已备用）
-│   │   ├── graph/                # 工作流节点（保留兼容LangGraph）
-│   │   │   ├── workflow.py       # LangGraph工作流定义（已备用）
-│   │   │   ├── state.py          # 状态类型定义
-│   │   │   └── nodes.py          # 所有节点实现（planner, R1, tools, synthesizer）
-│   │   ├── tools/                # 工具集
-│   │   │   ├── rag_tool.py       # RAG 向量检索
-│   │   │   ├── mcp_tools.py      # MCP 工具管理器（带重试机制）
-│   │   │   ├── r1_tool.py        # DeepSeek R1 封装
-│   │   │   └── tool_registry.py  # 工具注册表（所有工具定义）
-│   │   └── app.py                # Agent入口（已备用）
-│   ├── data/                     # 数据目录
-│   │   ├── travel_docs/          # 旅游攻略文档
-│   │   └── travel_vectordb/      # ChromaDB 向量数据库
-│   ├── .env                      # 环境变量
-│   ├── requirements.txt          # Python 依赖
-│   └── setup.py                  # 安装脚本
+travel-agent/
+├── multi-agents/                 # Multi-Agents 架构实现
+│   ├── agent_nodes/              # 各 Agent 实现
+│   │   ├── planner_agent.py      # 规划师 Agent
+│   │   ├── executor_agent.py     # 执行者 Agent
+│   │   ├── summarizer_agent.py   # 总结者 Agent
+│   │   ├── feedback_agent.py     # 反馈 Agent
+│   │   └── main_agent.py         # 主 Agent 协调
+│   ├── config/                    # 配置文件
+│   │   ├── prompts.py             # Prompt 模板
+│   │   ├── settings.py            # 全局配置
+│   │   └── servers_config.json    # MCP 服务器配置
+│   ├── graph/                     # LangGraph 工作流
+│   │   ├── workflow.py            # 工作流定义
+│   │   └── state.py               # 状态类型定义
+│   ├── tools/                     # 工具集
+│   │   ├── rag_tool.py            # RAG 向量检索
+│   │   ├── mcp_tools.py           # MCP 工具管理器
+│   │   ├── context_compressor.py  # 上下文压缩
+│   │   └── tool_registry.py       # 工具注册表
+│   ├── data/                      # 数据目录
+│   │   ├── user_profiles/         # 用户画像
+│   │   └── chat_history.db        # 聊天历史数据库
+│   ├── app.py                     # Streamlit UI 入口
+│   ├── chat_history_manager.py    # 聊天历史管理
+│   ├── user_profile_manager.py    # 用户画像管理
+│   ├── requirements.txt           # Python 依赖
+│   └── .env                       # 环境变量
 │
-├── app.py                        # ✅ Streamlit UI（主入口）
-├── check_mcp_health.py           # ✅ MCP 健康检查工具
-├── README.md                     # 项目文档
-├── LICENSE                       # MIT 许可证
-├── .gitignore                    # Git 忽略配置
-└── .gitattributes                # Git 属性配置
+├── README.md                      # 项目文档
+├── LICENSE                        # MIT 许可证
+└── .gitignore                     # Git 忽略配置
 ```
 
 **核心文件说明**:
-- `app.py`: Streamlit UI 主程序，包含预分析层和 Agent 创建
-- `nodes.py`: 所有节点实现（planner, r1_strategy, train_query, synthesizer 等）
-- `mcp_tools.py`: MCP 工具管理器，带自动重试和超时保护
-- `tool_registry.py`: 所有可用工具的定义和描述
-- `prompts.py`: 所有 LLM Prompt 模板
-
----
-
-## 📝 使用方式
-
-### Streamlit UI 界面
-
-启动应用后，浏览器自动打开 `http://localhost:8501`：
-
-1. **主界面**: 聊天对话窗口
-2. **侧边栏**:
-   - 📚 上传旅游攻略文档（可选）
-   - ⚙️ 系统配置（最大迭代次数）
-   - 🧰 查看工具列表
-   - 🗑️ 清空聊天记录
-
-3. **对话示例**:
-   ```
-   用户：我想12月18日从上海出发，去徐州和青岛旅游3天，预算1500元
-   
-   系统：🌍 检测到多目的地行程，将调用深度路线优化...
-   🚄 正在查询交通信息...
-   ☀️ 正在查询天气预报...
-   🏨 正在搜索酒店...
-   
-   [详细的旅行方案]
-   ```
-
-### 命令行工具
-
-#### MCP 健康检查
-```bash
-python check_mcp_health.py
-```
-
-#### 导入旅游攻略到 RAG
-```python
-from aggentic_RAG.travel_agent.tools.rag_tool import TravelRAGTool
-rag = TravelRAGTool()
-rag.build_knowledge_base("./aggentic_RAG/data/travel_docs")
-```
+- `multi-agents/app.py`: Streamlit UI 主程序
+- `multi-agents/graph/workflow.py`: LangGraph 工作流定义
+- `multi-agents/agent_nodes/`: 各专门 Agent 的实现
+- `multi-agents/tools/mcp_tools.py`: MCP 工具管理器
+- `multi-agents/config/settings.py`: 全局配置
 
 ---
 
 ## 🐛 故障排查
 
-### 1. 后端启动失败
+### 1. 模块导入错误
 
-**问题**：`ModuleNotFoundError: No module named 'travel_agent'`
+**问题**：`ModuleNotFoundError: No module named 'xxx'`
 
 **解决**：
 ```bash
-cd aggentic_RAG
-pip install -e .
+cd multi-agents
+pip install -r requirements.txt
 ```
 
-### 2. 向量数据库为空
-
-**问题**：简单查询返回"未找到相关信息"
-
-**解决**：导入旅游攻略文档到 RAG
-```python
-from travel_agent.tools.rag_tool import TravelRAGTool
-rag = TravelRAGTool()
-rag.build_knowledge_base("./data/travel_docs")
-```
-
-### 3. MCP 工具调用失败
+### 2. MCP 工具调用失败
 
 **问题**：火车票、天气查询返回错误
 
 **解决**：
-1. 检查 MCP 服务器是否启动
-2. 验证 `servers_config.json` 配置
-3. 运行健康检查工具
+1. 检查 MCP 服务器 URL 是否正确
+2. 验证 `config/servers_config.json` 配置
+3. 查看 Streamlit 后台日志
 
-```bash
-python check_mcp_health.py
-```
-
-4. 查看 Streamlit 后台日志（终端窗口）
-
-### 4. Streamlit 启动失败
+### 3. Streamlit 启动失败
 
 **问题**：Streamlit 无法启动或报错
 
@@ -770,14 +484,14 @@ python check_mcp_health.py
 2. 检查端口 8501 是否被占用
 3. 尝试指定端口：`streamlit run app.py --server.port 8502`
 
-### 5. DeepSeek R1 调用失败
+### 4. API Key 错误
 
-**问题**：复杂规划没有使用 R1 分析
+**问题**：模型调用返回认证错误
 
 **解决**：
-1. 检查 `DEEPSEEK_API_KEY` 是否正确
-2. 确认用户查询触发了 `needs_deep_analysis`
-3. 查看后端日志确认 R1 节点是否被调用
+1. 检查 `.env` 文件中的 API Key 是否正确
+2. 确认 API Key 没有过期
+3. 检查账户是否有足够的额度
 
 ---
 
@@ -785,71 +499,38 @@ python check_mcp_health.py
 
 ### 修改 Prompt
 
-编辑 `aggentic_RAG/travel_agent/config/prompts.py`：
+编辑 `multi-agents/config/prompts.py`：
 
 ```python
 # 修改规划提示词
 PLANNER_SYSTEM_PROMPT = """你的自定义提示词..."""
-
-# 修改合成提示词
-SYNTHESIZER_PROMPT_TEMPLATE = """你的自定义提示词..."""
 ```
 
 ### 调整模型参数
 
-编辑 `aggentic_RAG/travel_agent/config/settings.py`：
+编辑 `multi-agents/config/settings.py`：
 
 ```python
+# 模型温度
+QWEN3_TEMPERATURE = 0.7
+R1_TEMPERATURE = 0.1
+
 # RAG 分块大小
 RAG_CHUNK_SIZE = 500
 RAG_CHUNK_OVERLAP = 50
-
-# 检索数量
-RAG_TOP_K = 5
-
-# 模型温度
-LLM_TEMPERATURE = 0.7
 ```
 
 ### 添加新工具
 
-1. 在 `tool_registry.py` 中添加工具定义：
-```python
-ToolDefinition(
-    name="my_new_tool",
-    description="新工具的功能描述",
-    parameters={
-        "type": "object",
-        "properties": {
-            "param1": {
-                "type": "string",
-                "description": "参数说明"
-            }
-        },
-        "required": ["param1"]
-    },
-    tool_type="mcp",  # 或 "r1", "special"
-    server_name="Your Server",
-    mcp_tool_name="tool_name_in_mcp"
-)
-```
+1. 在 `tools/tool_registry.py` 中添加工具定义
+2. 在 `config/servers_config.json` 中配置对应的 MCP 服务器
+3. 在 `tools/mcp_tools.py` 中添加工具调用逻辑（如需要）
 
-2. 如果需要自定义处理逻辑，在 `app.py` 中添加工具处理函数
+### 添加新 Agent
 
-### 添加新节点（高级）
-
-在 `nodes.py` 中添加新的处理节点：
-```python
-async def my_custom_node(state: TravelPlanState) -> Dict[str, Any]:
-    """自定义节点逻辑"""
-    # 处理逻辑
-    return {
-        "custom_field": "result",
-        "messages": [AIMessage(content="处理完成")]
-    }
-```
-
-**注意**: 当前系统使用 LangChain Agent，不需要手动编排节点。Agent 会自动决定调用顺序。
+1. 在 `agent_nodes/` 目录下创建新的 Agent 文件
+2. 在 `graph/workflow.py` 中更新工作流定义
+3. 在 `graph/state.py` 中添加必要的状态字段
 
 ---
 
@@ -873,9 +554,7 @@ async def my_custom_node(state: TravelPlanState) -> Dict[str, Any]:
 
 ## 📧 联系方式
 
-该项目Created by Alex，如有问题或建议，请提交 Issue 或联系项目维护者。
-
-**项目地址**: [https://github.com/alexlmoney83-oss/travel-planning-agent]
+如有问题或建议，请提交 Issue 或联系项目维护者。
 
 ---
 
