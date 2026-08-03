@@ -2,6 +2,7 @@
 全局配置文件
 """
 import os
+import logging
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -43,3 +44,48 @@ RAG_BATCH_SIZE = 10  # ChromaDB批量载入大小，如遇到API限制可调小
 
 # MCP配置
 MCP_CONFIG_PATH = str(PROJECT_ROOT / "config" / "servers_config.json")
+
+# ========== 日志配置 ==========
+LOG_DIR = PROJECT_ROOT.parent / "logs"
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+
+def setup_logging(level: str = None):
+    """配置全局日志系统"""
+    log_level = getattr(logging, (level or LOG_LEVEL).upper(), logging.INFO)
+
+    # 确保日志目录存在
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+    # 根 logger 配置
+    root_logger = logging.getLogger()
+    root_logger.setLevel(log_level)
+
+    # 清除已有 handler，避免重复
+    root_logger.handlers.clear()
+
+    # 控制台 handler
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(log_level)
+    console_handler.setFormatter(logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt=LOG_DATE_FORMAT
+    ))
+    root_logger.addHandler(console_handler)
+
+    # 文件 handler
+    file_handler = logging.FileHandler(
+        LOG_DIR / "travel_agent.log",
+        encoding="utf-8"
+    )
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(logging.Formatter(
+        LOG_FORMAT, datefmt=LOG_DATE_FORMAT
+    ))
+    root_logger.addHandler(file_handler)
+
+    # 抑制第三方库的噪音
+    for lib in ["mcp", "anyio", "asyncio", "chromadb", "httpx", "openai", "urllib3"]:
+        logging.getLogger(lib).setLevel(logging.WARNING)

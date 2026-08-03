@@ -2,19 +2,19 @@
     "mcp_servers": [
         {
             "name": "12306 Server",
-            "url": "https://mcp.api-inference.modelscope.net/6a1dd8b4e3f048/sse",
+            "url": "https://mcp.api-inference.modelscope.net/ec7e567c1fab42/mcp",
             "description": "火车票查询服务 - 必需",
             "required": true
         },
         {
             "name": "Gaode Server",
-            "url": "https://mcp.api-inference.modelscope.net/5c232d4a7c7347/sse",
+            "url": "https://mcp.api-inference.modelscope.net/3df3b04ef5d94a/mcp",
             "description": "高德地图服务（路线规划、酒店、天气、POI搜索）- 必需",
             "required": true
         },
         {
             "name": "bazi Server",
-            "url": "https://mcp.api-inference.modelscope.net/b9502515547b43/sse",
+            "url": "https://mcp.api-inference.modelscope.net/a20da4f31afb4e/mcp",
             "description": "八字黄历服务（农历、黄历宜忌、出行吉日）- 必需",
             "required": true
         },

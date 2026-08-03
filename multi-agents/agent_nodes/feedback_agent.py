@@ -12,6 +12,10 @@ from langchain_core.messages import AIMessage
 from config.settings import QWEN3_MODEL, QWEN3_API_BASE, DASHSCOPE_API_KEY, QWEN3_TEMPERATURE
 from graph.state import GlobalState
 from user_profile_manager import get_profile_manager
+import logging
+
+
+logger = logging.getLogger(__name__)
 
 
 async def analyze_feedback_with_llm(user_feedback: str, current_profile: Dict[str, Any]) -> Dict[str, Any]:
@@ -96,7 +100,7 @@ async def analyze_feedback_with_llm(user_feedback: str, current_profile: Dict[st
     try:
         return json.loads(content.strip())
     except Exception as e:
-        print(f"❌ 解析反馈分析结果失败: {e}")
+        logger.error(f"❌ 解析反馈分析结果失败: {e}")
         return {
             "feedback_type": "neutral",
             "preference_updates": {},
@@ -114,13 +118,13 @@ async def feedback_agent_node(state: GlobalState) -> Dict[str, Any]:
     2. 更新用户档案
     3. 返回给 Main Agent 做决策
     """
-    print(f"\n{'='*60}")
-    print("💬 Feedback Agent 开始执行")
-    print(f"{'='*60}")
+    logger.debug("=" * 60)
+    logger.info("💬 Feedback Agent 开始执行")
+    logger.debug("=" * 60)
     
     user_feedback = state.get("user_query", "") or ""
     
-    print(f"📝 用户反馈: {user_feedback}")
+    logger.info(f"📝 用户反馈: {user_feedback}")
     
     profile_manager = get_profile_manager()
     current_profile = profile_manager.load_profile()
@@ -132,17 +136,17 @@ async def feedback_agent_node(state: GlobalState) -> Dict[str, Any]:
         needs_replan = analysis_result.get("needs_replan", False)
         feedback_type = analysis_result.get("feedback_type", "neutral")
         
-        print(f"✅ 生成确认消息: {confirmation_message}")
-        print(f"📋 反馈类型: {feedback_type}")
-        print(f"🔄 是否需要重新规划: {needs_replan}")
+        logger.info(f"✅ 生成确认消息: {confirmation_message}")
+        logger.info(f"📋 反馈类型: {feedback_type}")
+        logger.info(f"🔄 是否需要重新规划: {needs_replan}")
         
         # 更新用户档案（同步更新，确保新偏好立即生效）
         if preference_updates:
-            print(f"📋 更新偏好: {preference_updates}")
+            logger.info(f"📋 更新偏好: {preference_updates}")
             profile_manager.update_profile(preference_updates)
         
-        print(f"\n✅ Feedback Agent 执行完成，返回给 Main Agent")
-        print(f"{'='*60}\n")
+        logger.info("✅ Feedback Agent 执行完成，返回给 Main Agent")
+        logger.debug("=" * 60)
         
         # 返回给 Main Agent，让它做决策
         return {
@@ -156,7 +160,7 @@ async def feedback_agent_node(state: GlobalState) -> Dict[str, Any]:
         }
         
     except Exception as e:
-        print(f"❌ Feedback Agent 异常: {e}")
+        logger.error(f"❌ Feedback Agent 异常: {e}")
         import traceback
         traceback.print_exc()
         

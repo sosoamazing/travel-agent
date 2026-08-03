@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import hashlib
 import uuid
+import logging
 
 import sys
 import os
@@ -25,6 +26,8 @@ from config.settings import (
     RAG_SEARCH_K,
     RAG_BATCH_SIZE,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class TravelRAG:
@@ -59,15 +62,15 @@ class TravelRAG:
     def _initialize_vector_store(self):
         """初始化向量数据库"""
         if os.path.exists(self.persist_directory):
-            print(f"✅ 加载现有向量数据库: {self.persist_directory}")
+            logger.info(f"✅ 加载现有向量数据库: {self.persist_directory}")
             self.vector_store = Chroma(
                 persist_directory=self.persist_directory,
                 embedding_function=self.embeddings,
                 collection_name="travel_knowledge"
             )
         else:
-            print(f"⚠️ 向量数据库不存在，请先加载文档: {self.persist_directory}")
-            print("   使用 build_knowledge_base() 方法创建知识库")
+            logger.warning(f"⚠️ 向量数据库不存在，请先加载文档: {self.persist_directory}")
+            logger.warning("   使用 build_knowledge_base() 方法创建知识库")
             self.vector_store = None
         
         # 创建检索器
@@ -81,9 +84,9 @@ class TravelRAG:
                 existing_data = self.vector_store.get()
                 if existing_data and 'ids' in existing_data:
                     self.imported_ids = set(existing_data['ids'])
-                    print(f"  📊 已加载 {len(self.imported_ids)} 条现有数据")
+                    logger.info(f"  📊 已加载 {len(self.imported_ids)} 条现有数据")
             except Exception as e:
-                print(f"  ⚠️ 无法加载现有ID: {e}")
+                logger.warning(f"  ⚠️ 无法加载现有ID: {e}")
     
     def load_documents(self, source_path: str, file_type: str = "auto") -> List[Document]:
         """加载文档 - 支持多种格式
@@ -130,7 +133,7 @@ class TravelRAG:
                     loader = PyPDFLoader(source_path)
                     documents = loader.load()
                 except ImportError:
-                    print("⚠️ 需要安装pypdf: pip install pypdf")
+                    logger.warning("⚠️ 需要安装pypdf: pip install pypdf")
                     raise
                     
             # 加载单个CSV文件
@@ -139,7 +142,7 @@ class TravelRAG:
                     loader = CSVLoader(source_path, encoding="utf-8")
                     documents = loader.load()
                 except ImportError:
-                    print("⚠️ 需要安装csv支持")
+                    logger.warning("⚠️ 需要安装csv支持")
                     raise
                     
             # 加载整个目录
@@ -157,7 +160,7 @@ class TravelRAG:
                     )
                     loaders.append(txt_loader)
                 except Exception as e:
-                    print(f"⚠️ TXT加载器初始化失败: {e}")
+                    logger.warning(f"⚠️ TXT加载器初始化失败: {e}")
                 
                 # Markdown文件
                 try:
@@ -170,7 +173,7 @@ class TravelRAG:
                     )
                     loaders.append(md_loader)
                 except Exception as e:
-                    print(f"⚠️ MD加载器初始化失败: {e}")
+                    logger.warning(f"⚠️ MD加载器初始化失败: {e}")
                 
                 # PDF文件
                 try:
@@ -182,9 +185,9 @@ class TravelRAG:
                     )
                     loaders.append(pdf_loader)
                 except ImportError:
-                    print("⚠️ 跳过PDF文件（需要安装pypdf: pip install pypdf）")
+                    logger.warning("⚠️ 跳过PDF文件（需要安装pypdf: pip install pypdf）")
                 except Exception as e:
-                    print(f"⚠️ PDF加载器初始化失败: {e}")
+                    logger.warning(f"⚠️ PDF加载器初始化失败: {e}")
                 
                 # CSV文件
                 try:
@@ -196,28 +199,28 @@ class TravelRAG:
                     )
                     loaders.append(csv_loader)
                 except ImportError:
-                    print("⚠️ 跳过CSV文件")
+                    logger.warning("⚠️ 跳过CSV文件")
                 except Exception as e:
-                    print(f"⚠️ CSV加载器初始化失败: {e}")
+                    logger.warning(f"⚠️ CSV加载器初始化失败: {e}")
                 
                 # 执行所有加载器
                 for loader in loaders:
                     try:
                         docs = loader.load()
                         documents.extend(docs)
-                        print(f"  ✅ 成功加载 {len(docs)} 个文档片段")
+                        logger.info(f"  ✅ 成功加载 {len(docs)} 个文档片段")
                     except Exception as e:
-                        print(f"  ⚠️ 部分文件加载失败: {e}")
+                        logger.warning(f"  ⚠️ 部分文件加载失败: {e}")
                         continue
                         
             else:
                 raise ValueError(f"不支持的文件类型: {file_type}")
             
-            print(f"\n✅ 总共成功加载 {len(documents)} 个文档")
+            logger.info(f"✅ 总共成功加载 {len(documents)} 个文档")
             return documents
             
         except Exception as e:
-            print(f"❌ 文档加载失败: {e}")
+            logger.error(f"❌ 文档加载失败: {e}")
             raise
     
     @staticmethod
@@ -246,17 +249,17 @@ class TravelRAG:
         force_recreate: bool = False
     ):
         """构建知识库"""
-        print(f"\n📂 正在加载文档: {source_path}")
+        logger.info(f"📂 正在加载文档: {source_path}")
         
         # 加载文档
         documents = self.load_documents(source_path, file_type)
         
         # 分割文档
         split_docs = self.text_splitter.split_documents(documents)
-        print(f"✅ 文档分割完成，共 {len(split_docs)} 个块")
+        logger.info(f"✅ 文档分割完成，共 {len(split_docs)} 个块")
         
         # 生成UUID
-        print(f"🆔 正在生成UUID...")
+        logger.info(f"🆔 正在生成UUID...")
         doc_ids = [self.generate_doc_id(doc, idx) for idx, doc in enumerate(split_docs)]
         
         # 检查重复
@@ -264,16 +267,16 @@ class TravelRAG:
             new_ids = [doc_id for doc_id in doc_ids if doc_id not in self.imported_ids]
             duplicate_count = len(doc_ids) - len(new_ids)
             if duplicate_count > 0:
-                print(f"  ⚠️ 发现 {duplicate_count} 个重复文档块，将跳过")
+                logger.warning(f"  ⚠️ 发现 {duplicate_count} 个重复文档块，将跳过")
                 # 过滤出新文档
                 filtered_docs = [doc for doc, doc_id in zip(split_docs, doc_ids) if doc_id not in self.imported_ids]
                 filtered_ids = new_ids
                 split_docs = filtered_docs
                 doc_ids = filtered_ids
-                print(f"  ✅ 实际导入 {len(split_docs)} 个新文档块")
+                logger.info(f"  ✅ 实际导入 {len(split_docs)} 个新文档块")
         
         if len(split_docs) == 0:
-            print(f"⚠️ 没有新文档需要导入")
+            logger.warning(f"⚠️ 没有新文档需要导入")
             return
         
         # 创建或更新向量数据库
@@ -282,7 +285,7 @@ class TravelRAG:
             shutil.rmtree(self.persist_directory)
             self.imported_ids.clear()
         
-        print(f"📊 正在创建向量数据库...")
+        logger.info(f"📊 正在创建向量数据库...")
         
         # 批量处理，使用配置的batch_size
         batch_size = RAG_BATCH_SIZE
@@ -304,10 +307,10 @@ class TravelRAG:
             # 更新已导入ID集合
             self.imported_ids.update(batch_ids)
             
-            print(f"  处理进度: {min(i+batch_size, len(split_docs))}/{len(split_docs)} 批")
+            logger.info(f"  处理进度: {min(i+batch_size, len(split_docs))}/{len(split_docs)} 批")
         
-        print(f"✅ 知识库构建完成！")
-        print(f"📊 总数据量: {len(self.imported_ids)} 条")
+        logger.info(f"✅ 知识库构建完成！")
+        logger.info(f"📊 总数据量: {len(self.imported_ids)} 条")
         
         # 重新初始化检索器
         self.retriever = self.vector_store.as_retriever(
@@ -325,7 +328,7 @@ class TravelRAG:
             删除的数据条数
         """
         if not self.vector_store:
-            print("⚠️ 向量数据库未初始化")
+            logger.warning("⚠️ 向量数据库未初始化")
             return 0
         
         try:
@@ -339,13 +342,13 @@ class TravelRAG:
                 self.vector_store.delete(ids=results['ids'])
                 # 从集合中移除
                 self.imported_ids -= set(results['ids'])
-                print(f"✅ 已删除 {delete_count} 条数据（来源: {source_path}）")
+                logger.info(f"✅ 已删除 {delete_count} 条数据（来源: {source_path}）")
                 return delete_count
             else:
-                print(f"⚠️ 未找到来源为 {source_path} 的数据")
+                logger.warning(f"⚠️ 未找到来源为 {source_path} 的数据")
                 return 0
         except Exception as e:
-            print(f"❌ 删除失败: {e}")
+            logger.error(f"❌ 删除失败: {e}")
             return 0
     
     def get_stats(self) -> dict:
@@ -361,24 +364,24 @@ class TravelRAG:
                 "sources": list(sources)
             }
         except Exception as e:
-            print(f"⚠️ 获取统计信息失败: {e}")
+            logger.warning(f"⚠️ 获取统计信息失败: {e}")
             return {"total": 0, "sources": []}
     
     async def search(self, query: str, k: Optional[int] = None) -> str:
         """检索旅游攻略"""
         import asyncio
         
-        print(f"\n{'='*60}")
-        print(f"📚 RAG检索: {query}")
-        print(f"{'='*60}")
+        logger.debug("=" * 60)
+        logger.info(f"📚 RAG检索: {query}")
+        logger.debug("=" * 60)
         
         if not self.vector_store:
-            print(f"❌ 知识库未初始化")
-            print(f"{'='*60}\n")
+            logger.error(f"❌ 知识库未初始化")
+            logger.debug("=" * 60)
             return "知识库未初始化，请先构建知识库"
         
         k = k or RAG_SEARCH_K
-        print(f"  检索数量: {k}")
+        logger.info(f"  检索数量: {k}")
         
         try:
             # 使用 asyncio.to_thread 将同步调用移到线程池
@@ -389,25 +392,25 @@ class TravelRAG:
             )
             
             if not docs:
-                print(f"❌ 未找到相关旅游攻略")
-                print(f"{'='*60}\n")
+                logger.error(f"❌ 未找到相关旅游攻略")
+                logger.debug("=" * 60)
                 return "未找到相关旅游攻略"
             
-            print(f"✅ 找到 {len(docs)} 条相关结果")
+            logger.info(f"✅ 找到 {len(docs)} 条相关结果")
             
             results = []
             for i, doc in enumerate(docs, 1):
                 content = doc.page_content[:300]
                 source = doc.metadata.get("source", "未知")
-                print(f"\n  [{i}] 来源: {source}")
-                print(f"      内容预览: {content[:100]}...")
+                logger.debug(f"  [{i}] 来源: {source}")
+                logger.debug(f"      内容预览: {content[:100]}...")
                 results.append(f"[{i}] 来源: {source}\n{content}")
             
-            print(f"\n{'='*60}\n")
+            logger.debug("=" * 60)
             return "\n\n".join(results)
         except Exception as e:
-            print(f"❌ 检索失败: {str(e)}")
-            print(f"{'='*60}\n")
+            logger.error(f"❌ 检索失败: {str(e)}")
+            logger.debug("=" * 60)
             return f"检索失败: {str(e)}"
 
 

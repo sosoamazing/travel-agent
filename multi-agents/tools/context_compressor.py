@@ -7,6 +7,9 @@ from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, System
 from config.settings import DASHSCOPE_API_KEY, QWEN3_MODEL, QWEN3_API_BASE, QWEN3_TEMPERATURE
 from langchain_openai import ChatOpenAI
 import json
+import logging
+
+logger = logging.getLogger(__name__)
 
 llm = ChatOpenAI(
     model=QWEN3_MODEL,
@@ -86,10 +89,10 @@ class ContextCompressor:
                 "summary": None
             }
         
-        print(f"\n{'='*60}")
-        print("📦 [Context Compressor] 开始压缩上下文...")
-        print(f"  原始消息数: {len(messages)}")
-        print(f"{'='*60}")
+        logger.debug("=" * 60)
+        logger.info("📦 [Context Compressor] 开始压缩上下文...")
+        logger.info(f"  原始消息数: {len(messages)}")
+        logger.debug("=" * 60)
         
         conversation_text = self._format_messages(messages)
         
@@ -131,10 +134,10 @@ class ContextCompressor:
             
             result = json.loads(content)
             
-            print(f"\n✅ 压缩成功:")
-            print(f"  摘要: {result.get('summary', '')[:100]}...")
-            print(f"  关键点: {len(result.get('key_points', []))}个")
-            print(f"{'='*60}\n")
+            logger.info("✅ 压缩成功:")
+            logger.info(f"  摘要: {result.get('summary', '')[:100]}...")
+            logger.info(f"  关键点: {len(result.get('key_points', []))}个")
+            logger.debug("=" * 60)
             
             return {
                 "compressed": True,
@@ -147,9 +150,7 @@ class ContextCompressor:
             }
             
         except Exception as e:
-            print(f"❌ 压缩失败: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.error(f"❌ 压缩失败: {e}", exc_info=True)
             
             return {
                 "compressed": True,

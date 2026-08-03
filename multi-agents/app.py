@@ -9,12 +9,17 @@ import asyncio
 import warnings
 import logging
 import sys
+import queue
+import threading
 from typing import List, Dict, Any
 
-# 配置日志来静默MCP客户端的警告
+from config.settings import setup_logging
+
+# 初始化日志系统（在所有 import 之后尽早调用）
+setup_logging()
+
+# 额外抑制一些第三方库的噪音
 logging.getLogger('mcp').setLevel(logging.ERROR)
-logging.getLogger('anyio').setLevel(logging.ERROR)
-logging.getLogger('asyncio').setLevel(logging.ERROR)
 
 # suppress warnings
 warnings.filterwarnings('ignore', category=DeprecationWarning)
@@ -318,77 +323,141 @@ _mcp_manager = None
 
 async def run_multi_agents(user_query: str, state: GlobalState = None) -> GlobalState:
     """
-    运行Multi-Agents旅游规划系统 - 按新架构
-    
-    Args:
-        user_query: 用户查询
-        state: 可选的已有状态（用于多轮对话）
-    
-    Returns:
-        更新后的状态
+    运行Multi-Agents旅游规划系统 - 非流式（回退用）
     """
+    from graph.workflow import travel_graph
+    from langchain_core.messages import HumanMessage, AIMessage
+
     if state is None:
         state = initialize_multi_agents_state()
     
-    # 每次新查询开始时：
-    # 1. 保留全局对话历史（messages）
-    # 2. 重置各子 Agent 的上下文
     state["user_query"] = user_query
-    state["messages"].append(HumanMessage(content=user_query))
+    state["messages"] = list(state.get("messages", [])) + [HumanMessage(content=user_query)]
     state["is_complete"] = False
     state["current_agent"] = None
     state["next_agent"] = None
-    
-    # 重置各子 Agent 的上下文，让它们重新开始
     state["planner_context"] = None
     state["executor_context"] = None
     state["summarizer_context"] = None
     
     result = await travel_graph.ainvoke(state)
     
-    # 把AI的回复也添加到对话历史中，支持多轮对话
+    # 提取最终回答
     final_answer = None
-    
-    # 检查是否是 main_agent 直接返回的回答
     if result.get("is_complete") and result.get("messages"):
-        # 遍历 messages 找最后一条 AI 消息
         for msg in reversed(result["messages"]):
             try:
-                if isinstance(msg, AIMessage):
+                if isinstance(msg, AIMessage) and msg.content:
                     final_answer = msg.content
                     break
                 elif hasattr(msg, 'type') and msg.type == 'ai':
-                    final_answer = msg.content
-                    break
+                    final_answer = getattr(msg, 'content', '') or final_answer
+                    if final_answer:
+                        break
             except Exception:
                 continue
     
-    # 如果 main_agent 没有直接回答，检查 summarizer 和 planner
     if not final_answer:
         if result.get("summarizer_context") and result["summarizer_context"].get("final_summary"):
             final_answer = result["summarizer_context"]["final_summary"]
         elif result.get("planner_context") and result["planner_context"].get("clarification_question"):
             final_answer = result["planner_context"]["clarification_question"]
     
-    # 只有当 final_answer 不是已经在 messages 里时才添加
     if final_answer:
-        # 检查是否已经在 messages 里了
-        already_added = False
-        for msg in result["messages"]:
-            try:
-                if isinstance(msg, AIMessage) and msg.content == final_answer:
-                    already_added = True
-                    break
-                if hasattr(msg, 'type') and msg.type == 'ai' and getattr(msg, 'content', '') == final_answer:
-                    already_added = True
-                    break
-            except Exception:
-                continue
-        
+        already_added = any(
+            (isinstance(msg, AIMessage) or (hasattr(msg, 'type') and msg.type == 'ai'))
+            and getattr(msg, 'content', '') == final_answer
+            for msg in result.get("messages", [])
+        )
         if not already_added:
             result["messages"].append(AIMessage(content=final_answer))
     
     return result
+
+
+def stream_graph_generator(user_query: str, state: GlobalState = None):
+    """
+    流式输出生成器：通过队列在线程间传递 token
+    
+    返回一个（异步）生成器，由 _sync_stream_iter 同步消费
+    """
+    from graph.workflow import travel_graph
+    from langchain_core.messages import HumanMessage
+
+    if state is None:
+        state = initialize_multi_agents_state()
+
+    # 用 TokenQueueHolder 包装 queue，避免与 asyncio.Queue 混淆
+    class TokenQueueHolder:
+        def __init__(self):
+            self._q = queue.Queue()
+        def put(self, item):
+            self._q.put(item)
+        def get(self, timeout=None):
+            return self._q.get(timeout=timeout)
+    
+    token_queue = TokenQueueHolder()
+    result_holder = {}
+
+    # 复制状态，准备输入
+    input_state = dict(state)
+    input_state["user_query"] = user_query
+    input_state["messages"] = list(state.get("messages", [])) + [HumanMessage(content=user_query)]
+    input_state["is_complete"] = False
+    input_state["current_agent"] = None
+    input_state["next_agent"] = None
+    input_state["planner_context"] = None
+    input_state["executor_context"] = None
+    input_state["summarizer_context"] = None
+
+    async def producer():
+        logger = logging.getLogger(__name__)
+        try:
+            async for event in travel_graph.astream_events(input_state, version="v2"):
+                kind = event["event"]
+                if kind == "on_chat_model_stream":
+                    # 只将标记了 "stream_to_user" 的 LLM 输出推送到前端
+                    event_tags = event.get("tags", [])
+                    if "stream_to_user" not in event_tags:
+                        continue
+                    chunk_data = event["data"]["chunk"]
+                    token = chunk_data.content if hasattr(chunk_data, 'content') else ""
+                    if token:
+                        token_queue.put(("token", token))
+                elif kind == "on_chain_end" and event.get("name") == "LangGraph":
+                    result_holder["result"] = event["data"]["output"]
+        except Exception as e:
+            logger.error(f"流式执行异常: {e}")
+            token_queue.put(("error", str(e)))
+    
+    def run_producer():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(producer())
+        loop.close()
+
+    t = threading.Thread(target=run_producer, daemon=True)
+    t.start()
+
+    accumulated = ""
+    while True:
+        try:
+            item_type, value = token_queue.get(timeout=0.1)
+            if item_type == "token":
+                accumulated += value
+                yield {"__type__": "token", "text": accumulated}
+            elif item_type == "error":
+                yield {"__type__": "error", "text": value}
+                break
+        except queue.Empty:
+            if not t.is_alive():
+                # Thread done, get final result if any
+                if "result" in result_holder:
+                    yield {"__type__": "final", "state": result_holder["result"],
+                           "text": accumulated}
+                break
+    
+    t.join()
 
 # 显示历史消息
 for msg in st.session_state.messages:
@@ -480,36 +549,61 @@ if user_query := st.chat_input(placeholder="请输入您的旅行需求，例如
         st.markdown(user_query)
     
     with st.chat_message("assistant"):
-        with st.spinner("🤖 Multi-Agents正在协作规划您的旅行..."):
-            try:
-                import asyncio
+        message_placeholder = st.empty()
+        full_response = ""
+        result = None
+        error_occurred = False
+        
+        try:
+            # 使用流式生成器，逐 token 更新显示
+            for chunk in stream_graph_generator(
+                user_query, 
+                st.session_state.multi_agents_state
+            ):
+                chunk_type = chunk.get("__type__", "")
+                if chunk_type == "token":
+                    full_response = chunk["text"]
+                    message_placeholder.markdown(full_response + "▌")
+                elif chunk_type == "final":
+                    full_response = chunk["text"] or full_response
+                    result = chunk["state"]
+                    break
+                elif chunk_type == "error":
+                    st.error(f"处理出错: {chunk['text']}")
+                    error_occurred = True
+                    break
+            
+            if not error_occurred:
+                # 移除闪烁光标，显示最终文本
+                message_placeholder.markdown(full_response)
                 
-                # 运行Multi-Agents系统
-                result = asyncio.run(
-                    run_multi_agents(
-                        user_query, 
-                        st.session_state.multi_agents_state
+                # 如果没有通过 final event 拿到结果，使用旧逻辑提取
+                if result is None:
+                    # 回退：不用流式，直接调用
+                    result = asyncio.run(
+                        run_multi_agents(
+                            user_query, 
+                            st.session_state.multi_agents_state
+                        )
                     )
-                )
                 
                 # 更新状态
                 st.session_state.multi_agents_state = result
                 
-                # 显示当前执行的Agent信息
-                current_agent = result.get("current_agent", "unknown")
-                st.info(f"🤖 当前处理Agent: {current_agent}")
+                # 获取最终回答
+                answer = full_response if full_response else "处理完成，但没有生成回答。"
                 
-                # 获取回答 - 从新的上下文结构
-                answer = "处理完成，但没有生成回答。"
                 if result.get("planner_context") and result["planner_context"].get("needs_clarification", False):
-                    answer = result["planner_context"].get("clarification_question", "请提供更多信息")
+                    answer = result["planner_context"].get("clarification_question", answer)
                 elif result.get("summarizer_context") and result["summarizer_context"].get("final_summary"):
                     answer = result["summarizer_context"]["final_summary"]
-                elif result.get("is_complete") and result.get("messages"):
-                    # 检查最后一条消息是否是AI的回复
-                    last_msg = result["messages"][-1] if result["messages"] else None
-                    if last_msg and hasattr(last_msg, 'type') and last_msg.type == 'ai':
-                        answer = last_msg.content
+                
+                # 如果 final_summary 和流式文本不同，以前者为准
+                if not full_response:
+                    if result.get("is_complete") and result.get("messages"):
+                        last_msg = result["messages"][-1] if result["messages"] else None
+                        if last_msg and hasattr(last_msg, 'type') and last_msg.type == 'ai':
+                            answer = last_msg.content
                 
                 # 保存AI回答到数据库
                 chat_manager.add_message(
@@ -518,26 +612,22 @@ if user_query := st.chat_input(placeholder="请输入您的旅行需求，例如
                     content=answer
                 )
                 
-                # 添加助手消息
                 st.session_state.messages.append({"role": "assistant", "content": answer})
                 
-                # 显示回答
-                st.markdown(answer)
-                
-            except Exception as e:
-                import traceback
-                traceback.print_exc()
-                error_msg = f"抱歉，Multi-Agents处理您的请求时出现错误：{str(e)}"
-                st.error(error_msg)
-                
-                # 保存错误消息到数据库
-                chat_manager.add_message(
-                    session_id=st.session_state.current_session_id,
-                    message_type="ai",
-                    content=error_msg
-                )
-                
-                st.session_state.messages.append({"role": "assistant", "content": error_msg})
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            error_msg = f"抱歉，Multi-Agents处理您的请求时出现错误：{str(e)}"
+            st.error(error_msg)
+            
+            # 保存错误消息到数据库
+            chat_manager.add_message(
+                session_id=st.session_state.current_session_id,
+                message_type="ai",
+                content=error_msg
+            )
+            
+            st.session_state.messages.append({"role": "assistant", "content": error_msg})
 
 # 侧边栏 - 显示当前配置
 with st.sidebar:

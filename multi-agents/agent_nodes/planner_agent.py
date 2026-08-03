@@ -5,6 +5,7 @@ Planner Agent - 负责制定详细的执行计划
 from typing import Dict, Any
 from datetime import datetime
 import json
+import logging
 from pydantic import BaseModel, Field
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
@@ -12,6 +13,9 @@ from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from config.settings import QWEN3_MODEL, QWEN3_API_BASE, DASHSCOPE_API_KEY, QWEN3_TEMPERATURE
 from config.prompts import PLANNER_SYSTEM_PROMPT
 from graph.state import GlobalState
+
+
+logger = logging.getLogger(__name__)
 
 
 class TravelPlanExtraction(BaseModel):
@@ -115,12 +119,12 @@ async def planner_agent_node(state: GlobalState) -> Dict[str, Any]:
     4. 识别查询模式（简单模式 vs 完整规划模式）
     5. 初始化自己的上下文，不预先指定plan_steps
     """
-    print(f"\n{'='*60}")
-    print("▶️ Planner Agent 开始执行（意图识别）")
-    print(f"{'='*60}")
+    logger.debug("=" * 60)
+    logger.info("▶️ Planner Agent 开始执行（意图识别）")
+    logger.debug("=" * 60)
     
     user_query = state.get("user_query", "") or ""
-    print(f"📝 用户查询: {user_query}")
+    logger.info("📝 用户查询: %s", user_query)
     
     # 从全局状态读取对话历史（只需要用户当前查询 + 最近几轮来理解上下文）
     conversation_messages = state.get("messages") or []
@@ -180,19 +184,19 @@ async def planner_agent_node(state: GlobalState) -> Dict[str, Any]:
             planner_context["needs_deep_analysis"] = extraction.needs_deep_analysis
             planner_context["tools_needed"] = extraction.tools_needed
             
-            print(f"\n🔍 LLM提取结果:")
-            print(f"  目的地: {planner_context.get('destination')}")
-            print(f"  出发地: {planner_context.get('origin')}")
-            print(f"  旅行天数: {planner_context.get('travel_days')}")
-            print(f"  预算: {planner_context.get('budget')}")
-            print(f"  出发日期: {planner_context.get('travel_date')}")
-            print(f"  需要深度分析: {planner_context.get('needs_deep_analysis')}")
+            logger.info("🔍 LLM提取结果:")
+            logger.info("  目的地: %s", planner_context.get('destination'))
+            logger.info("  出发地: %s", planner_context.get('origin'))
+            logger.info("  旅行天数: %s", planner_context.get('travel_days'))
+            logger.info("  预算: %s", planner_context.get('budget'))
+            logger.info("  出发日期: %s", planner_context.get('travel_date'))
+            logger.info("  需要深度分析: %s", planner_context.get('needs_deep_analysis'))
             
             # 首先基于关键词进行简单查询预检测
             simple_keywords = ["天气", "景点", "美食", "攻略", "推荐", "怎么样", "如何", "好玩", "哪里"]
             has_simple_keyword = any(kw in user_query for kw in simple_keywords)
-            print(f"\n🔍 简单查询检测:")
-            print(f"  包含简单关键词: {has_simple_keyword}")
+            logger.info("🔍 简单查询检测:")
+            logger.info("  包含简单关键词: %s", has_simple_keyword)
             
             multi_dest_detection = detect_multi_destination(user_query, planner_context)
             if multi_dest_detection.get('is_multi_destination', False):
@@ -212,12 +216,12 @@ async def planner_agent_node(state: GlobalState) -> Dict[str, Any]:
                 has_simple_keyword
             )
             
-            print(f"  is_simple_query: {is_simple_query}")
+            logger.info("  is_simple_query: %s", is_simple_query)
             
             if is_simple_query:
-                print(f"\n🔍 检测到简单查询模式")
-                print(f"  ➡️ 下一步: executor（ReAct模式，LLM自主决策）")
-                print(f"  ✅ 设置 query_mode 为 'simple'")
+                logger.info("🔍 检测到简单查询模式")
+                logger.info("  ➡️ 下一步: executor（ReAct模式，LLM自主决策）")
+                logger.info("  ✅ 设置 query_mode 为 'simple'")
                 
                 # 如果没有提取到目的地，尝试从用户查询中提取
                 destination_for_query = planner_context.get('destination', '')
@@ -229,7 +233,7 @@ async def planner_agent_node(state: GlobalState) -> Dict[str, Any]:
                             destination_for_query = city
                             planner_context['destination'] = city
                             break
-                    print(f"  从查询中提取到目的地: {destination_for_query}")
+                    logger.info("  从查询中提取到目的地: %s", destination_for_query)
                 
                 planner_context["query_mode"] = "simple"
                 planner_context["needs_clarification"] = False
@@ -241,7 +245,7 @@ async def planner_agent_node(state: GlobalState) -> Dict[str, Any]:
                     "next_agent": "executor"
                 }
             
-            print(f"\n📋 检测到完整规划模式")
+            logger.info("📋 检测到完整规划模式")
             
             # 完整规划模式：检查关键信息是否缺失
             missing_fields = []
@@ -251,11 +255,11 @@ async def planner_agent_node(state: GlobalState) -> Dict[str, Any]:
             if planner_context['destination'] and not planner_context['origin']:
                 missing_fields.append("出发地")
             
-            print(f"  缺失的字段: {missing_fields}")
+            logger.info("  缺失的字段: %s", missing_fields)
             
             if missing_fields:
                 clarification = f"请问您的{''.join(missing_fields)}是哪里？这样我才能为您查询具体的交通和行程信息。"
-                print(f"  ❌ 需要澄清: {clarification}")
+                logger.error("  ❌ 需要澄清: %s", clarification)
                 planner_context["needs_clarification"] = True
                 planner_context["clarification_question"] = clarification
                 return {
@@ -265,8 +269,8 @@ async def planner_agent_node(state: GlobalState) -> Dict[str, Any]:
                     "is_complete": True
                 }
             
-            print(f"  ✅ 信息完整，准备执行")
-            print(f"  ➡️ 下一步: executor（Plan-then-Execute模式）")
+            logger.info("  ✅ 信息完整，准备执行")
+            logger.info("  ➡️ 下一步: executor（Plan-then-Execute模式）")
             planner_context["query_mode"] = "full"
             planner_context["needs_clarification"] = False
             return {

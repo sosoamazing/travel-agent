@@ -9,6 +9,9 @@ from langchain_openai import ChatOpenAI
 from config.settings import QWEN3_MODEL, QWEN3_API_BASE, DASHSCOPE_API_KEY, QWEN3_TEMPERATURE
 from graph.state import GlobalState
 from user_profile_manager import get_profile_manager
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 async def summarizer_agent_node(state: GlobalState) -> Dict[str, Any]:
@@ -21,9 +24,9 @@ async def summarizer_agent_node(state: GlobalState) -> Dict[str, Any]:
     2. 结合用户偏好和兴趣
     3. 生成最终的旅游规划回答
     """
-    print(f"\n{'='*60}")
-    print("▶️ Summarizer Agent 开始执行")
-    print(f"{'='*60}")
+    logger.debug("=" * 60)
+    logger.info("▶️ Summarizer Agent 开始执行")
+    logger.debug("=" * 60)
     
     # 从全局状态读取需要的信息
     user_query = state.get("user_query", "")
@@ -52,16 +55,18 @@ async def summarizer_agent_node(state: GlobalState) -> Dict[str, Any]:
     profile_manager = get_profile_manager()
     user_preferences_str = profile_manager.format_profile_for_prompt()
     
-    print(f"📊 状态信息:")
-    print(f"  query_mode: {query_mode}")
-    print(f"  工具执行结果数: {len(tool_results)}")
-    print(f"  RAG结果数: {len(rag_results_history)}")
+    logger.info("📊 状态信息:")
+    logger.info(f"  query_mode: {query_mode}")
+    logger.info(f"  工具执行结果数: {len(tool_results)}")
+    logger.info(f"  RAG结果数: {len(rag_results_history)}")
     
     llm = ChatOpenAI(
         model=QWEN3_MODEL,
         base_url=QWEN3_API_BASE,
         api_key=DASHSCOPE_API_KEY,
-        temperature=QWEN3_TEMPERATURE
+        temperature=QWEN3_TEMPERATURE,
+        streaming=True,
+        tags=["stream_to_user"]
     )
     
     # 简单查询模式的提示词 - 更简洁，专注于用户的具体问题
@@ -148,8 +153,8 @@ async def summarizer_agent_node(state: GlobalState) -> Dict[str, Any]:
         else:
             tool_results_str += f"【{result['tool']}】{result['result']}\n"
     
-    print(f"\n📝 开始生成回答，模式: {query_mode}")
-    print(f"📋 用户偏好已注入")
+    logger.info(f"📝 开始生成回答，模式: {query_mode}")
+    logger.info("📋 用户偏好已注入")
     
     # 构建操作提示
     operation_hints = []
@@ -161,18 +166,21 @@ async def summarizer_agent_node(state: GlobalState) -> Dict[str, Any]:
     mode_hint = "🔍 简单查询模式" if query_mode == "simple" else "🧠 完整规划模式"
     
     if query_mode == "simple":
-        print(f"  使用简单查询提示词")
+        logger.info("  使用简单查询提示词")
         chain = simple_prompt | llm
-        response = await chain.ainvoke({
+        response_content = ""
+        async for chunk in chain.astream({
             "user_query": user_query,
             "user_preferences": user_preferences_str,
             "rag_results": rag_results,
             "tool_results": tool_results_str
-        })
+        }):
+            response_content += chunk.content
     else:
-        print(f"  使用完整规划提示词")
+        logger.info("  使用完整规划提示词")
         chain = full_prompt | llm
-        response = await chain.ainvoke({
+        response_content = ""
+        async for chunk in chain.astream({
             "user_query": user_query,
             "user_preferences": user_preferences_str,
             "destination": destination,
@@ -183,22 +191,23 @@ async def summarizer_agent_node(state: GlobalState) -> Dict[str, Any]:
             "preferences": preferences,
             "rag_results": rag_results,
             "tool_results": tool_results_str
-        })
+        }):
+            response_content += chunk.content
     
     # 更新自己的上下文
-    summarizer_context["final_summary"] = response.content
+    summarizer_context["final_summary"] = response_content
     
-    print(f"\n✅ Summarizer Agent 执行完成")
-    print(f"  回答长度: {len(response.content)} 字符")
-    print(f"  下一步: 结束")
-    print(f"{'='*60}\n")
+    logger.info("✅ Summarizer Agent 执行完成")
+    logger.info(f"  回答长度: {len(response_content)} 字符")
+    logger.info("  下一步: 结束")
+    logger.debug("=" * 60)
     
     # 将操作提示添加到最终回答的开头
     hints_str = f"{mode_hint}\n"
     if operation_hints:
         hints_str += "\n".join(operation_hints) + "\n\n"
     
-    final_answer = hints_str + response.content
+    final_answer = hints_str + response_content
     summarizer_context["final_summary"] = final_answer
     
     return {

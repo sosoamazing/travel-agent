@@ -8,6 +8,7 @@ import json
 import os
 import ssl
 import httpx
+import traceback
 from pathlib import Path
 import sys
 import warnings
@@ -18,6 +19,8 @@ import logging
 logging.getLogger('mcp').setLevel(logging.ERROR)
 logging.getLogger('anyio').setLevel(logging.ERROR)
 logging.getLogger('asyncio').setLevel(logging.ERROR)
+
+logger = logging.getLogger(__name__)
 
 # suppress async generator warnings and MCP client cleanup errors
 warnings.filterwarnings('ignore', category=RuntimeWarning, message='.*async_generator.*')
@@ -37,19 +40,19 @@ from config.settings import PROJECT_ROOT, MCP_CONFIG_PATH
 try:
     from agents.mcp import MCPServerSse
 except ImportError as e:
-    print(f"\n❌ 导入agents.mcp失败: {e}")
-    print(f"🔍 Python解释器: {sys.executable}")
-    print(f"🔍 sys.path前5项:")
+    logger.error(f"❌ 导入agents.mcp失败: {e}")
+    logger.info(f"🔍 Python解释器: {sys.executable}")
+    logger.info(f"🔍 sys.path前5项:")
     for i, p in enumerate(sys.path[:5]):
-        print(f"  {i+1}. {p}")
+        logger.info(f"  {i+1}. {p}")
     
     # 尝试查找agents包是否存在
     try:
         import agents
-        print(f"✅ agents包找到: {agents.__file__}")
-        print(f"❌ 但agents.mcp模块不存在")
+        logger.info(f"✅ agents包找到: {agents.__file__}")
+        logger.error(f"❌ 但agents.mcp模块不存在")
     except ImportError:
-        print(f"❌ agents包未安装")
+        logger.error(f"❌ agents包未安装")
     
     raise ImportError(
         f"\n\nopenai-agents包未正确安装或agents.mcp模块不可用\n"
@@ -93,7 +96,7 @@ class MCPToolManager:
             url = server_conf.get("url")
             
             if not url:
-                print(f"⚠️ 警告: 服务器 {name} 缺少URL，跳过")
+                logger.warning(f"⚠️ 警告: 服务器 {name} 缺少URL，跳过")
                 continue
             
             try:
@@ -101,10 +104,10 @@ class MCPToolManager:
                     MCPServerSse(name=name, params={"url": url})
                 )
                 self.mcp_servers[name] = server
-                # 静默模式，不输出连接日志
+                logger.info(f"✅ MCP已连接: {name} ({url})")
             except Exception as e:
-                # 静默失败，不输出错误
-                pass
+                logger.warning(f"⚠️ MCP连接失败 [{name}]: {e}")
+                logger.debug(f"详细错误:\n{traceback.format_exc()}")
     
     async def call_tool(self, server_name: str, tool_name: str, max_retries: int = 2, **kwargs) -> str:
         """
@@ -128,7 +131,7 @@ class MCPToolManager:
         for attempt in range(max_retries + 1):
             try:
                 if attempt > 0:
-                    print(f"  🔄 第{attempt}次重试 {server_name}.{tool_name}...")
+                    logger.info(f"  🔄 第{attempt}次重试 {server_name}.{tool_name}...")
                     await asyncio.sleep(1 * attempt)  # 指数退避: 1s, 2s
                 
                 result = await self.mcp_servers[server_name].call_tool(
@@ -168,8 +171,8 @@ class MCPToolManager:
                 ])
                 
                 if is_retryable and attempt < max_retries:
-                    print(f"  ⚠️ [MCP错误] {server_name}.{tool_name} - {type(e).__name__}")
-                    print(f"     原因: SSE连接中断，将重试...")
+                    logger.warning(f"  ⚠️ [MCP错误] {server_name}.{tool_name} - {type(e).__name__}")
+                    logger.warning(f"     原因: SSE连接中断，将重试...")
                     continue  # 重试
                 else:
                     # 不可重试或已达最大重试次数
@@ -205,7 +208,7 @@ class MCPToolManager:
                     tool_names.append(str(tool))
             return tool_names
         except Exception as e:
-            print(f"获取工具列表失败: {e}")
+            logger.error(f"获取工具列表失败: {e}")
             return []
     
     async def cleanup(self):
@@ -223,9 +226,11 @@ _mcp_manager = None
 
 
 async def get_mcp_manager() -> MCPToolManager:
-    """获取全局MCP管理器实例"""
+    """获取全局MCP管理器实例（若未连接则自动重试初始化）"""
     global _mcp_manager
-    if _mcp_manager is None:
+    if _mcp_manager is None or len(_mcp_manager.mcp_servers) == 0:
+        if _mcp_manager is not None:
+            logger.warning("⚠️ 之前MCP初始化未成功连接，重新尝试...")
         _mcp_manager = MCPToolManager()
         await _mcp_manager.initialize()
     return _mcp_manager

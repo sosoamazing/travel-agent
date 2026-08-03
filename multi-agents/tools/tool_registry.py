@@ -143,6 +143,183 @@ AVAILABLE_TOOLS: List[ToolDefinition] = [
         mcp_tool_name="maps_direction_driving"
     ),
     
+    ToolDefinition(
+        name="gaode_regeo",
+        description="逆地理编码：将经纬度坐标转换为具体地址信息（省/市/区/街道）。当需要根据坐标确定具体位置时使用，例如确认某个POI属于哪个区、是否方便游玩。",
+        parameters={
+            "type": "object",
+            "properties": {
+                "location": {
+                    "type": "string",
+                    "description": "经纬度坐标，格式：'经度,纬度'，例如：'116.397428,39.90923'"
+                }
+            },
+            "required": ["location"]
+        },
+        tool_type="mcp",
+        server_name="Gaode Server",
+        mcp_tool_name="maps_regeocode"
+    ),
+    
+    ToolDefinition(
+        name="gaode_ip_location",
+        description="IP定位：根据IP地址获取当前位置信息（省份、城市、城市编码）。可用于快速确定用户所在城市，辅助起终点判断。",
+        parameters={
+            "type": "object",
+            "properties": {
+                "ip": {
+                    "type": "string",
+                    "description": "IP地址，例如：'114.247.50.2'。如不传则定位请求来源IP。"
+                }
+            },
+            "required": []
+        },
+        tool_type="mcp",
+        server_name="Gaode Server",
+        mcp_tool_name="maps_ip_location"
+    ),
+    
+    ToolDefinition(
+        name="gaode_bicycling",
+        description="骑行路线规划：规划两地之间的骑行方案，考虑天桥、单行线、封路等情况。适用于市内短距离景点间的骑行导航，最大支持500km。",
+        parameters={
+            "type": "object",
+            "properties": {
+                "origin": {
+                    "type": "string",
+                    "description": "起点坐标（经纬度），格式：'经度,纬度'"
+                },
+                "destination": {
+                    "type": "string",
+                    "description": "终点坐标（经纬度），格式：'经度,纬度'"
+                }
+            },
+            "required": ["origin", "destination"]
+        },
+        tool_type="mcp",
+        server_name="Gaode Server",
+        mcp_tool_name="maps_bicycling"
+    ),
+    
+    ToolDefinition(
+        name="gaode_walking",
+        description="步行路线规划：规划100km以内的步行方案。适用于市内景点间步行游览路线规划，例如：'从酒店步行到西湖需要多久'。",
+        parameters={
+            "type": "object",
+            "properties": {
+                "origin": {
+                    "type": "string",
+                    "description": "起点坐标（经纬度），格式：'经度,纬度'"
+                },
+                "destination": {
+                    "type": "string",
+                    "description": "终点坐标（经纬度），格式：'经度,纬度'"
+                }
+            },
+            "required": ["origin", "destination"]
+        },
+        tool_type="mcp",
+        server_name="Gaode Server",
+        mcp_tool_name="maps_direction_walking"
+    ),
+    
+    ToolDefinition(
+        name="gaode_transit",
+        description="公交路线规划：综合火车、公交、地铁等公共交通方式规划通勤方案。跨城场景必须传起点城市与终点城市。适用于市内或跨城公共交通出行规划。",
+        parameters={
+            "type": "object",
+            "properties": {
+                "origin": {
+                    "type": "string",
+                    "description": "起点坐标（经纬度），格式：'经度,纬度'"
+                },
+                "destination": {
+                    "type": "string",
+                    "description": "终点坐标（经纬度），格式：'经度,纬度'"
+                },
+                "city": {
+                    "type": "string",
+                    "description": "起点城市名称，跨城时必填"
+                },
+                "cityd": {
+                    "type": "string",
+                    "description": "终点城市名称，跨城时必填"
+                }
+            },
+            "required": ["origin", "destination"]
+        },
+        tool_type="mcp",
+        server_name="Gaode Server",
+        mcp_tool_name="maps_direction_transit_integrated"
+    ),
+    
+    ToolDefinition(
+        name="gaode_distance",
+        description="距离测量：测量两个经纬度坐标之间的直线距离和预计耗时。适用于快速估算两地的远近程度，辅助行程安排决策。",
+        parameters={
+            "type": "object",
+            "properties": {
+                "origin": {
+                    "type": "string",
+                    "description": "起点坐标（经纬度），格式：'经度,纬度'"
+                },
+                "destination": {
+                    "type": "string",
+                    "description": "终点坐标（经纬度），格式：'经度,纬度'"
+                }
+            },
+            "required": ["origin", "destination"]
+        },
+        tool_type="mcp",
+        server_name="Gaode Server",
+        mcp_tool_name="maps_distance"
+    ),
+    
+    ToolDefinition(
+        name="gaode_around_search",
+        description="周边搜索：根据关键词和中心点坐标，搜索指定半径范围内的POI地点。适用于查找'酒店附近有什么餐厅''景点周边有什么购物'等场景。",
+        parameters={
+            "type": "object",
+            "properties": {
+                "keywords": {
+                    "type": "string",
+                    "description": "搜索关键词，例如：'餐厅'、'购物'、'地铁站'"
+                },
+                "location": {
+                    "type": "string",
+                    "description": "中心点经纬度，格式：'经度,纬度'"
+                },
+                "radius": {
+                    "type": "integer",
+                    "description": "搜索半径（米），默认1000",
+                    "default": 1000
+                }
+            },
+            "required": ["keywords", "location"]
+        },
+        tool_type="mcp",
+        server_name="Gaode Server",
+        mcp_tool_name="maps_around_search"
+    ),
+    
+    ToolDefinition(
+        name="gaode_detail_search",
+        description="POI详情搜索：查询指定POI ID的详细信息，包括地址、商圈、类型、评分等。通常在关键词搜索或周边搜索后，用于获取某个具体地点的完整信息。",
+        parameters={
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string",
+                    "description": "POI ID，从gaode_poi_search或gaode_around_search结果中获取"
+                }
+            },
+            "required": ["id"]
+        },
+        tool_type="mcp",
+        server_name="Gaode Server",
+        mcp_tool_name="maps_search_detail"
+    ),
+    
     # ========== 12306 MCP 工具 ==========
     ToolDefinition(
         name="train_query",
