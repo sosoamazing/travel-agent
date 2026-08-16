@@ -1,0 +1,52 @@
+# LangChain 核心依赖
+langchain>=0.1.0
+langchain-openai>=0.1.0
+langchain-community>=0.0.1
+langchain-chroma>=0.1.0
+langgraph>=0.1.0
+
+# 向量数据库
+chromadb>=0.5.0
+
+# LLM 提供商
+dashscope>=1.20.0  # Qwen
+openai>=1.0.0      # OpenAI API兼容
+
+# MCP 工具 (需要openai-agents作为MCP客户端)
+mcp>=0.1.0
+openai-agents>=0.1.0
+
+# 消息队列 (MQ) - 每个 MCP 服务器独立的内存消息队列 + 速率限制
+# aiolimiter: 异步令牌桶速率限制库（默认每 0.4 秒最多 1 次调用，见 config.settings）
+aiolimiter>=1.1.0
+
+# Streamlit UI
+streamlit>=1.30.0
+
+# 数据库 - PostgreSQL
+psycopg2-binary>=2.9.0   # PostgreSQL 同步驱动（含连接池 ThreadedConnectionPool）
+SQLAlchemy>=2.0.0        # SQLAlchemy 2.0 异步 ORM/连接池
+asyncpg>=0.29.0          # PostgreSQL asyncpg 异步驱动
+
+# FastAPI 服务化
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+httpx>=0.27.0          # gateway 转发 backend 的 HTTP 客户端
+pydantic-settings>=2.0.0
+python-json-logger>=2.0.0  # 结构化 JSON 日志
+
+# JWT 认证
+bcrypt>=4.0.0          # 密码哈希
+PyJWT>=2.8.0           # JWT 令牌签发/校验
+
+# LangGraph 断点续跑（Postgres checkpoint）
+langgraph-checkpoint-postgres>=3.1.0   # PostgresSaver / AsyncPostgresSaver
+psycopg[binary,pool]>=3.2.0            # psycopg3 + AsyncConnectionPool（checkpoint 专用）
+
+# 其他
+python-dotenv>=1.0.0
+pydantic>=2.0.0
+requests>=2.31.0          # Streamlit 前端通过 HTTP 调用 FastAPI
+nest-asyncio>=1.5.0
+numpy>=1.24.0             # 语义检索中计算余弦相似度
+diskcache>=5.6.0          # 本地磁盘级持久化缓存（工具查询/RAG 结果）

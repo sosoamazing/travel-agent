@@ -101,12 +101,25 @@
 最终输出
 ```
 
+### 微服务架构
+
+```
+React 前端 (JWT) ──► gateway :8000 ──► backend :8001
+                        │ 对外鉴权         │ /internal/* 业务 + LangGraph
+                        │                  └─ 写入 obs_* 表
+                        └── monitor :8002（直连 PostgreSQL 只读 obs_*，供管理员监控）
+```
+
+- **gateway**（`:8000`）：对外唯一入口，JWT 本地鉴权后转发到 backend；SSE 透传。
+- **backend**（`:8001`）：业务核心，暴露 `/internal/*`，按 `user_id` 做资源归属校验。
+- **monitor**（`:8002`）：管理员监控服务，不依赖 backend 代码，直连 PostgreSQL 只读聚合观测数据。
+
 ### 核心技术栈
 
 **后端**：
 - **LangGraph**: Multi-Agents 工作流编排
 - **LangChain**: Agent 框架和工具集成
-- **Streamlit**: Web UI 界面
+- **FastAPI + uvicorn**: 微服务（gateway / backend / monitor 三进程）
 - **ChromaDB**: 向量数据库（存储旅游攻略）
 - **DashScope**: 阿里云模型服务（Qwen3-plus + text-embedding-v3）
 - **DeepSeek API**: 深度推理模型（deepseek-reasoner）
@@ -222,16 +235,16 @@ cd travel-agent
 
 ### 2. 安装依赖
 
-进入 multi-agents 目录并安装依赖：
+进入 backend 目录并安装依赖：
 
 ```bash
-cd multi-agents
+cd backend
 pip install -r requirements.txt
 ```
 
 ### 3. 配置环境变量
 
-在 `multi-agents` 目录下创建或编辑 `.env` 文件：
+在 `backend` 目录下创建或编辑 `.env` 文件：
 
 ```bash
 # 模型 API 密钥（必填）
@@ -294,20 +307,28 @@ CHROMA_PERSIST_DIR=../data/travel_vectordb
 - ✅ **Gaode Server**：地图、酒店、天气
 - ✅ **Bazi Server**：黄历查询
 
-### 5. 启动应用
+### 5. 启动应用（微服务三进程）
 
-在 multi-agents 目录运行:
+本项目已拆分为三个独立服务，启动顺序如下（均在 `travel-agent/travel-agent` 目录下，共用 backend 的 Python 环境）：
 
 ```bash
-streamlit run app.py
+# 1) backend 内部服务（业务逻辑 + LangGraph 工作流 + 观测写入），端口 8001
+uvicorn server:app --host 0.0.0.0 --port 8001 --app-dir backend
+
+# 2) gateway 对外网关（JWT 鉴权 + 转发到 backend），端口 8000
+uvicorn gateway.main:app --host 0.0.0.0 --port 8000
+
+# 3) monitor 监控服务（直连 PostgreSQL 只读 obs_* 表），端口 8002
+uvicorn monitor.main:app --host 0.0.0.0 --port 8002
 ```
 
-应用将在 `http://localhost:8501` 启动。
+> Windows 一键启动脚本：`start_services.ps1`（在项目根目录执行）。
 
 **验证安装**：
-- 启动成功后，浏览器会自动打开 Streamlit UI
-- 在侧边栏可以查看已加载的工具列表
-- 后台日志会显示 MCP 服务器连接状态
+- `GET http://127.0.0.1:8000/health` 返回 gateway 健康状态
+- `GET http://127.0.0.1:8001/internal/health` 返回 backend 健康状态
+- `GET http://127.0.0.1:8002/health` 返回 monitor 健康状态
+- React 前端（`frontend/`）通过 gateway 的 JWT 接口登录/对话
 
 ---
 
@@ -412,45 +433,41 @@ data/travel_vectordb/
 
 ```
 travel-agent/
-├── multi-agents/                 # Multi-Agents 架构实现
-│   ├── agent_nodes/              # 各 Agent 实现
-│   │   ├── planner_agent.py      # 规划师 Agent
-│   │   ├── executor_agent.py     # 执行者 Agent
-│   │   ├── summarizer_agent.py   # 总结者 Agent
-│   │   ├── feedback_agent.py     # 反馈 Agent
-│   │   └── main_agent.py         # 主 Agent 协调
-│   ├── config/                    # 配置文件
-│   │   ├── prompts.py             # Prompt 模板
-│   │   ├── settings.py            # 全局配置
-│   │   └── servers_config.json    # MCP 服务器配置
-│   ├── graph/                     # LangGraph 工作流
-│   │   ├── workflow.py            # 工作流定义
-│   │   └── state.py               # 状态类型定义
-│   ├── tools/                     # 工具集
-│   │   ├── rag_tool.py            # RAG 向量检索
-│   │   ├── mcp_tools.py           # MCP 工具管理器
-│   │   ├── context_compressor.py  # 上下文压缩
-│   │   └── tool_registry.py       # 工具注册表
-│   ├── data/                      # 数据目录
-│   │   ├── user_profiles/         # 用户画像
-│   │   └── chat_history.db        # 聊天历史数据库
-│   ├── app.py                     # Streamlit UI 入口
-│   ├── chat_history_manager.py    # 聊天历史管理
-│   ├── user_profile_manager.py    # 用户画像管理
-│   ├── requirements.txt           # Python 依赖
-│   └── .env                       # 环境变量
-│
-├── README.md                      # 项目文档
-├── LICENSE                        # MIT 许可证
-└── .gitignore                     # Git 忽略配置
+├── backend/                    # 业务核心 + 内部服务（:8001）
+│   ├── agent_nodes/            # LangGraph 各节点实现（classify / transport / city_planning / summarizer / info_query / params）
+│   │   ├── _observability.py   # 运行时观测追踪（写 obs_* 表）
+│   │   └── _obs_storage.py     # 观测 PostgreSQL 存储
+│   ├── config/                 # 配置（settings / prompts / servers_config.json）
+│   ├── core/                   # TravelService / TaskManager / checkpoint
+│   ├── graph/                  # LangGraph 工作流与状态
+│   ├── memory/                 # 记忆系统（episodic / semantic / working）
+│   ├── tools/                  # 工具集（registry / rag_tool / mcp_tools / typecode_db）
+│   ├── tests/                  # 基础设施测试
+│   ├── server.py               # backend 内部 FastAPI 服务（/internal/*）
+│   ├── auth.py                 # JWT / bcrypt 用户认证
+│   ├── db.py                   # PostgreSQL 连接池
+│   └── requirements.txt        # Python 依赖
+├── gateway/                    # 对外 API 网关（:8000，JWT 鉴权 + 转发 backend）
+│   ├── main.py
+│   └── schemas.py
+├── monitor/                    # 独立监控服务（:8002，直连 obs_* 只读）
+│   ├── main.py                 # REST 查询接口
+│   ├── analyze.py              # 观测聚合报表 / CLI
+│   └── db.py                   # 只读 DB 连接
+├── frontend/                   # React 前端（Vite + JWT）
+│   └── src/
+├── .env                        # 环境变量（JWT / PG / 模型密钥）
+└── start_services.ps1          # Windows 一键启动脚本
 ```
 
 **核心文件说明**:
-- `multi-agents/app.py`: Streamlit UI 主程序
-- `multi-agents/graph/workflow.py`: LangGraph 工作流定义
-- `multi-agents/agent_nodes/`: 各专门 Agent 的实现
-- `multi-agents/tools/mcp_tools.py`: MCP 工具管理器
-- `multi-agents/config/settings.py`: 全局配置
+- `backend/server.py`: backend 内部服务（供 gateway 转发）
+- `gateway/main.py`: 对外网关（JWT 本地鉴权）
+- `monitor/main.py`: 管理员监控服务（只读观测报表）
+- `backend/graph/workflow.py`: LangGraph 工作流定义
+- `backend/agent_nodes/`: 各专门 Agent 节点实现
+- `backend/tools/`: MCP / RAG / 高德等工具实现
+- `backend/config/settings.py`: 全局配置
 
 ---
 
@@ -462,7 +479,7 @@ travel-agent/
 
 **解决**：
 ```bash
-cd multi-agents
+cd backend
 pip install -r requirements.txt
 ```
 
@@ -499,7 +516,7 @@ pip install -r requirements.txt
 
 ### 修改 Prompt
 
-编辑 `multi-agents/config/prompts.py`：
+编辑 `backend/config/prompts.py`：
 
 ```python
 # 修改规划提示词
@@ -508,7 +525,7 @@ PLANNER_SYSTEM_PROMPT = """你的自定义提示词..."""
 
 ### 调整模型参数
 
-编辑 `multi-agents/config/settings.py`：
+编辑 `backend/config/settings.py`：
 
 ```python
 # 模型温度
