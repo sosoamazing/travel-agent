@@ -57,13 +57,15 @@ def _json_safe(obj: Any) -> Any:
     return json.loads(json.dumps(obj, ensure_ascii=False, default=str))
 
 
-def _default_state(user_query: str, session_id: Optional[str], user_id: str) -> GlobalState:
+def _default_state(user_query: str, session_id: Optional[str], user_id: str,
+                   intent: Optional[str] = None) -> GlobalState:
     """构建固定工作流的初始输入状态（对齐原 app.py 的字段重置逻辑）。"""
     return {
         "user_query": user_query,
         "messages": [],
         "session_id": session_id,
         "user_id": user_id,
+        "intent": intent,
         "final_answer": None,
         "current_agent": None,
         "next_agent": None,
@@ -153,11 +155,13 @@ def _write_result_json(result: Dict[str, Any]) -> None:
 class TaskRecord:
     """一次对话任务的运行时记录。"""
 
-    def __init__(self, task_id: str, user_query: str, session_id: Optional[str], user_id: str):
+    def __init__(self, task_id: str, user_query: str, session_id: Optional[str], user_id: str,
+                 intent: Optional[str] = None):
         self.task_id = task_id
         self.user_query = user_query
         self.session_id = session_id
         self.user_id = user_id
+        self.intent = intent
         self.status = "pending"  # pending | running | succeeded | failed
         self.current_node: Optional[str] = None
         self.progress_message: Optional[str] = None
@@ -194,22 +198,24 @@ class TaskManager:
         self._tasks: Dict[str, TaskRecord] = {}
         self._lock = threading.Lock()
 
-    def create(self, user_query: str, session_id: Optional[str], user_id: str) -> TaskRecord:
+    def create(self, user_query: str, session_id: Optional[str], user_id: str,
+               intent: Optional[str] = None) -> TaskRecord:
         with self._lock:
             self._prune_locked()
             task_id = uuid.uuid4().hex
-            record = TaskRecord(task_id, user_query, session_id, user_id)
+            record = TaskRecord(task_id, user_query, session_id, user_id, intent)
             self._tasks[task_id] = record
             return record
 
     def create_with_id(self, task_id: str, user_query: str,
-                       session_id: Optional[str], user_id: str) -> TaskRecord:
+                       session_id: Optional[str], user_id: str,
+                       intent: Optional[str] = None) -> TaskRecord:
         """用指定 ID 创建任务记录（断点续跑时 thread_id == task_id，需沿用原 ID）。"""
         with self._lock:
             self._prune_locked()
             if task_id in self._tasks:
                 raise ValueError(f"task_id 已存在: {task_id}")
-            record = TaskRecord(task_id, user_query, session_id, user_id)
+            record = TaskRecord(task_id, user_query, session_id, user_id, intent)
             self._tasks[task_id] = record
             return record
 
@@ -343,7 +349,8 @@ class TravelService:
     # ── 对话任务 ──────────────────────────────────────────
 
     async def submit_chat(self, user_query: str, session_id: Optional[str] = None,
-                          user_id: Optional[str] = None) -> str:
+                          user_id: Optional[str] = None,
+                          intent: Optional[str] = None) -> str:
         """提交一轮对话：持久化用户消息 → 创建任务 → 后台异步执行 → 返回 task_id。"""
         user_id = user_id or _DEFAULT_USER_ID
         if not session_id:
@@ -354,7 +361,7 @@ class TravelService:
         await self.add_message(session_id=session_id, message_type="user",
                                content=user_query, user_id=user_id)
 
-        record = self.tasks.create(user_query, session_id, user_id)
+        record = self.tasks.create(user_query, session_id, user_id, intent)
         record._asyncio_task = asyncio.create_task(self._run_task(record))
         return record.task_id
 
@@ -434,6 +441,7 @@ class TravelService:
                 user_id=record.user_id or "",
                 session_id=record.session_id or "",
                 user_query=record.user_query,
+                intent=record.intent,
             )
             record.obs_task_id = obs_task_id
             started_obs = True
@@ -442,7 +450,8 @@ class TravelService:
                 # 断点续跑：不重新注入输入，用同一 thread_id 从最近 checkpoint 继续
                 input_state = None
             else:
-                input_state = _default_state(record.user_query, record.session_id, record.user_id)
+                input_state = _default_state(record.user_query, record.session_id, record.user_id,
+                                             intent=record.intent)
                 # 注入多轮历史（含刚持久化的本轮用户消息）
                 input_state["messages"] = await _load_history_messages(record.session_id or "")
 

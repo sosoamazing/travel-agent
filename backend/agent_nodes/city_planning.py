@@ -506,7 +506,13 @@ async def _extract_hotels(hotel_raw: str, city: str, planner_context: Dict,
 """
     priced: List[Dict] = []
     try:
-        resp = await _LLM(agent="hotel_price", model_type="flash").ainvoke([HumanMessage(content=prompt)])
+        # 纯 JSON 估价任务无需推理：关闭思维链省掉大量 reasoning token，并设输出上限兜底
+        resp = await _LLM(
+            agent="hotel_price",
+            model_type="flash",
+            max_tokens=2048,
+            extra_body={"thinking": {"type": "disabled"}},
+        ).ainvoke([HumanMessage(content=prompt)])
         content = resp.content.strip()
         # 去掉可能的 ```json ... ``` 包裹
         if content.startswith("```"):

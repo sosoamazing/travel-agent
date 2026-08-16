@@ -40,6 +40,7 @@ def _acc(task_id: str) -> Dict[str, Any]:
         acc = {
             "version": AGENT_VERSION,
             "user_id": "", "session_id": "", "user_query": "",
+            "intent": "", "query_type": "",
             "nodes": {},
             "llm": {},
             "mcp": {},
@@ -53,16 +54,18 @@ def _acc(task_id: str) -> Dict[str, Any]:
 # ──────────────────────────────────────────────────────────
 
 async def start_task(user_id: str = "", session_id: str = "", user_query: str = "",
+                     intent: Optional[str] = None,
                      version: Optional[str] = None) -> str:
     """开始一个任务，返回 task_id。"""
     task_id = uuid.uuid4().hex
     ver = version or AGENT_VERSION
-    await get_obs_storage().start_task(task_id, ver, user_id, session_id, user_query)
+    await get_obs_storage().start_task(task_id, ver, user_id, session_id, user_query, intent=intent)
     acc = _acc(task_id)
     acc["version"] = ver
     acc["user_id"] = user_id
     acc["session_id"] = session_id
     acc["user_query"] = user_query
+    acc["intent"] = intent or ""
     _current_task_id.set(task_id)
     return task_id
 
@@ -138,6 +141,8 @@ async def end_task(status: str = "ok", error: Optional[str] = None):
         "cached_input_tokens": total_cached,
         "llm_duration_ms": round(llm_dur, 2),
         "tool_duration_ms": round(tool_dur, 2),
+        "intent": acc["intent"],
+        "query_type": acc.get("query_type", ""),
     }
 
     storage = get_obs_storage()
@@ -193,6 +198,17 @@ def record_llm(agent: str, model: str, input_tokens: int, output_tokens: int,
         if v["error"] is None:
             v["error"] = error
     return ""
+
+
+def record_query_type(query_type: str):
+    """记录 classify 节点的实际分类结果（用于与前端标注意图对比）。"""
+    task_id = _current_task_id.get()
+    if not task_id:
+        return
+    acc = _accumulators.get(task_id)
+    if acc is None:
+        return
+    acc["query_type"] = query_type
 
 
 def record_mcp(server: str, tool: str, duration_ms: float, status: str = "ok",
@@ -328,6 +344,8 @@ async def build_task_json(task_id: str) -> Dict[str, Any]:
         "tool_duration_ms": float(task.get("tool_duration_ms") or 0),
         "wall_clock_ms": float(task.get("duration_ms") or 0),
         "version": task.get("version") or "",
+        "intent": task.get("intent") or "",
+        "query_type": task.get("query_type") or "",
     }
 
     node_by_name: Dict[str, Dict[str, Any]] = {}

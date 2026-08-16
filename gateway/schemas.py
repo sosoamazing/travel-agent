@@ -11,6 +11,7 @@ class ChatRequest(BaseModel):
     user_query: str = Field(..., description="用户本轮输入")
     session_id: Optional[str] = Field(None, description="会话 ID；为空则自动新建会话")
     user_id: Optional[str] = Field("default_user", description="用户 ID（网关会以 JWT 覆盖）")
+    intent: Optional[str] = Field(None, description="用户意图（可发可不发）：planning/information/conversation/feedback")
 
 
 class ChatResponse(BaseModel):

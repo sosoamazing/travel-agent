@@ -18,6 +18,7 @@ class GlobalState(TypedDict):
 
     # ========== 意图分类 ==========
     query_type: Optional[str]  # conversation | feedback | travel
+    intent: Optional[str]      # 前端标注意图（可空）；仅记录用于对比，不参与路由选择
 
     # ========== 提取的旅行参数（单次提取） ==========
     planner_context: Dict[str, Any]

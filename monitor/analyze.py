@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 import statistics
 import sys
 from collections import defaultdict
@@ -222,17 +223,23 @@ def _get_task_spans(task_id: str) -> List[Dict[str, Any]]:
 # ──────────────────────────────────────────────────────────────
 # 数据源 1：PostgreSQL 历史任务
 # ──────────────────────────────────────────────────────────────
+def _version_sort_key(v: str) -> int:
+    m = re.match(r"^(\d+)", v or "")
+    return int(m.group(1)) if m else -1
+
+
 def list_versions() -> List[str]:
-    """返回 obs_tasks 中已记录的全部版本号（按版本降序）。"""
+    """返回 obs_tasks 中已记录的全部版本号（按 commit 序号数值降序）。"""
     try:
         with get_connection() as conn:
             cur = conn.cursor()
             cur.execute(
                 "SELECT DISTINCT version FROM obs_tasks "
-                "WHERE version IS NOT NULL AND version != '' ORDER BY version DESC"
+                "WHERE version IS NOT NULL AND version != ''"
             )
             versions = [r["version"] for r in cur.fetchall()]
             cur.close()
+        versions.sort(key=_version_sort_key, reverse=True)
         return versions
     except Exception as e:
         print(f"⚠️  list_versions 失败（{e}）")

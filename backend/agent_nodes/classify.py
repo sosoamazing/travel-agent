@@ -44,6 +44,8 @@ async def classify_node(state: Dict[str, Any]) -> Dict[str, Any]:
     except Exception:
         qt = "travel"
     logger.info(f"🔍 查询分类: {qt}")
+    from agent_nodes._observability import record_query_type
+    record_query_type(qt)
     return {"query_type": qt}
 
 

@@ -326,7 +326,9 @@ class _LLM:
     """
     def __init__(self, agent: str = "unknown", model_type: str = "pro",
                  temperature: Optional[float] = None, streaming: bool = False,
-                 tags: Optional[List[str]] = None):
+                 tags: Optional[List[str]] = None,
+                 max_tokens: Optional[int] = None,
+                 extra_body: Optional[Dict[str, Any]] = None):
         self.agent = agent
         self.model_type = model_type
         if model_type == "flash":
@@ -342,6 +344,13 @@ class _LLM:
             temperature=temp,
             stream_usage=True,
         )
+        # 可选：输出 token 上限（DeepSeek 推理模型 max_tokens 含思维链 token）
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
+        # 可选：非标准 OpenAI 参数（如 DeepSeek 的 thinking 开关）必须走 extra_body，
+        # 直接放 kwargs/model_kwargs 会被 openai SDK 当未知顶层参数抛 TypeError。
+        if extra_body:
+            kwargs["extra_body"] = extra_body
         if streaming:
             kwargs["streaming"] = True
             kwargs["tags"] = tags or ["stream_to_user"]

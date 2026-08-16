@@ -1,6 +1,6 @@
-"""20 用户并发压力测试脚本。
+"""N 用户并发压力测试脚本。
 
-场景：20 个测试用户，每个用户提交 1 个旅行问题（同时并发），走 gateway 完整链路
+场景：默认 50 个测试用户，每个用户提交 1 个旅行问题（同时并发），走 gateway 完整链路
 （注册/登录 → JWT → 建会话 → 提交 /chat → 轮询任务结果），验证：
   - 并发信号量（TASK_CONCURRENCY）下任务能否全部正常完成
   - 同会话并发拦截（每个用户独立会话，不应触发 409）
@@ -12,13 +12,18 @@
   3) DB / MCP 正常（health 接口 status=ok）
 
 运行：
-  python load_test_20users.py [gateway_url]
+  python load_test_20users.py [gateway_url] [--from-db N]
+
+参数：
+  --from-db N   从数据库 test_questions 表随机取 N 个问题（默认 N=50），
+                否则使用脚本内置的 QUESTIONS 列表
 
 输出：每个用户的任务结果 + 汇总统计（成功/失败/耗时分布）。
 """
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 import time
 from typing import Any, Dict, List, Optional
@@ -77,6 +82,7 @@ async def run_one_user(
     client: httpx.AsyncClient,
     idx: int,
     question: str,
+    intent: Optional[str] = None,
 ) -> Dict[str, Any]:
     """一个测试用户跑完整链路：建会话 → 提交问题 → 轮询到结束。"""
     username = f"test_user_{idx:02d}"
@@ -90,8 +96,10 @@ async def run_one_user(
             return {"user": username, "status": "session_fail", "error": r.text[:150], "cost": 0}
         session_id = r.json()["session_id"]
 
-        r = await client.post("/chat", headers=headers,
-                              json={"user_query": question, "session_id": session_id})
+        body = {"user_query": question, "session_id": session_id}
+        if intent:
+            body["intent"] = intent
+        r = await client.post("/chat", headers=headers, json=body)
         if r.status_code == 409:
             return {"user": username, "status": "conflict_409", "error": r.text[:150], "cost": 0}
         if r.status_code >= 400:
@@ -130,8 +138,40 @@ async def run_one_user(
                 "cost": time.perf_counter() - t_start}
 
 
+def load_questions_from_db(n: int = 50) -> List[Dict[str, str]]:
+    """从数据库 test_questions 表随机取 n 个 (question, intent) 对。"""
+    import psycopg2
+    from dotenv import load_dotenv
+    from pathlib import Path
+
+    load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env", override=True)
+    conn = psycopg2.connect(
+        host=os.getenv("PG_HOST", "localhost"),
+        port=int(os.getenv("PG_PORT", "5432")),
+        user=os.getenv("PG_USER", "travel_agent"),
+        password=os.getenv("PG_PASSWORD", "travel_agent"),
+        dbname=os.getenv("PG_DATABASE", "travel_agent"),
+    )
+    cur = conn.cursor()
+    cur.execute("SELECT question, COALESCE(intent, '') FROM test_questions ORDER BY random() LIMIT %s", (n,))
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return [{"question": r[0], "intent": r[1]} for r in rows]
+
+
 async def main() -> None:
-    print(f"🎯 目标: {BASE_URL} | 用户数={len(QUESTIONS)} | 并发提交\n")
+    # ── 问题来源：--from-db N 从数据库随机取，否则用内置列表 ──
+    questions = [{"question": q, "intent": ""} for q in QUESTIONS]
+    if "--from-db" in sys.argv:
+        idx = sys.argv.index("--from-db")
+        n = int(sys.argv[idx + 1]) if idx + 1 < len(sys.argv) else 50
+        try:
+            questions = load_questions_from_db(n)
+        except Exception as e:
+            print(f"⚠️ 从数据库取题失败（{e}），退回内置问题列表")
+
+    print(f"🎯 目标: {BASE_URL} | 用户数={len(questions)} | 并发提交\n")
     async with httpx.AsyncClient(base_url=BASE_URL, timeout=httpx.Timeout(30.0, connect=10.0)) as client:
         # 健康检查
         try:
@@ -142,7 +182,8 @@ async def main() -> None:
 
         t0 = time.perf_counter()
         results = await asyncio.gather(
-            *[run_one_user(client, i + 1, q) for i, q in enumerate(QUESTIONS)]
+            *[run_one_user(client, i + 1, q["question"], q.get("intent") or "")
+              for i, q in enumerate(questions)]
         )
         total_cost = time.perf_counter() - t0
 

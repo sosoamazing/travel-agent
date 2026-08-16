@@ -76,6 +76,7 @@ class _ChatReq(BaseModel):
     user_query: str
     session_id: Optional[str] = None
     user_id: str = "default_user"
+    intent: Optional[str] = None
 
 
 class _SessionReq(BaseModel):
@@ -242,6 +243,7 @@ async def chat(req: _ChatReq) -> Dict[str, Any]:
             user_query=req.user_query,
             session_id=req.session_id,
             user_id=req.user_id,
+            intent=req.intent,
         )
     except RuntimeError as e:
         # 同会话有进行中的任务 → 409，前端提示等待

@@ -48,6 +48,8 @@ class ObsStorage:
                                 user_id            TEXT,
                                 session_id         TEXT,
                                 user_query         TEXT,
+                                intent             TEXT,
+                                query_type         TEXT,
                                 status             TEXT NOT NULL DEFAULT 'running',
                                 error              TEXT,
                                 start_ts           DOUBLE PRECISION NOT NULL,
@@ -118,15 +120,16 @@ class ObsStorage:
     # ── 写 ──────────────────────────────────────────────────
 
     async def start_task(self, task_id: str, version: str, user_id: str,
-                         session_id: str, user_query: str) -> None:
+                         session_id: str, user_query: str,
+                         intent: Optional[str] = None) -> None:
         await self._ensure_init()
         async with async_db_connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
                     """INSERT INTO obs_tasks
-                       (task_id, version, user_id, session_id, user_query, status, start_ts)
-                       VALUES (%s,%s,%s,%s,%s,%s,%s)""",
-                    (task_id, version, user_id, session_id, user_query, "running", time.time()),
+                       (task_id, version, user_id, session_id, user_query, intent, status, start_ts)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
+                    (task_id, version, user_id, session_id, user_query, intent or "", "running", time.time()),
                 )
 
     async def end_task(self, task_id: str, status: str, error: Optional[str],
@@ -146,7 +149,8 @@ class ObsStorage:
                          status=%s, error=%s, end_ts=%s, duration_ms=%s,
                          node_count=%s, llm_call_count=%s, tool_call_count=%s,
                          total_input_tokens=%s, total_output_tokens=%s, cached_input_tokens=%s,
-                         llm_duration_ms=%s, tool_duration_ms=%s
+                         llm_duration_ms=%s, tool_duration_ms=%s,
+                         query_type=%s
                        WHERE task_id=%s""",
                     (status, error, end_ts, duration_ms,
                      int(summary.get("node_count", 0)),
@@ -157,6 +161,7 @@ class ObsStorage:
                      int(summary.get("cached_input_tokens", 0)),
                      float(summary.get("llm_duration_ms", 0)),
                      float(summary.get("tool_duration_ms", 0)),
+                     summary.get("query_type") or "",
                      task_id),
                 )
 

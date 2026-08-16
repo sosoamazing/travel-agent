@@ -109,25 +109,38 @@ HIGHWAY_TOLL_PER_KM = float(os.getenv("HIGHWAY_TOLL_PER_KM", "0.50"))
 DRIVING_MAX_DISTANCE_KM = float(os.getenv("DRIVING_MAX_DISTANCE_KM", "800"))
 
 # ========== 版本号（AGENT_VERSION） ==========
-# 任务级观测数据记录代码版本号（git 短 commit），每次 git 提交/上传自动变化。
-# 解析优先级：TRAVEL_AGENT_VERSION 环境变量 > git 短 commit > backend.__version__ > "unknown"。
+# 任务级观测数据记录代码版本号。格式：{git commit 序号}-{短hash}（如 11-253e9ba）。
+# commit 序号用 git rev-list --count 计算，每次提交严格 +1，天然有序，方便 monitor 按版本排序。
+# 解析优先级：TRAVEL_AGENT_VERSION 环境变量 > git commit 序号+短hash > backend.__version__ > "unknown"。
 # 所有异常一律吞掉，绝不允许因读 git 失败导致 import 崩溃。
 def _resolve_agent_version() -> str:
-    """解析当前代码版本号。"""
+    """解析当前代码版本号（commit 序号-短hash，有序）。"""
     env_ver = os.getenv("TRAVEL_AGENT_VERSION", "").strip()
     if env_ver:
         return env_ver
     try:
+        # 先取 commit 总数（从仓库第一个 commit 到 HEAD 的数量，严格递增）
         result = subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"],
+            ["git", "rev-list", "--count", "HEAD"],
             cwd=str(PROJECT_ROOT.parent),  # PROJECT_ROOT.parent 即 git 仓库根目录
             capture_output=True,
             text=True,
             timeout=5,
         )
-        short = (result.stdout or "").strip()
-        if result.returncode == 0 and short:
-            return short
+        count = (result.stdout or "").strip()
+        if result.returncode == 0 and count:
+            # 再取短 hash 用于追溯具体 commit
+            hash_res = subprocess.run(
+                ["git", "rev-parse", "--short", "HEAD"],
+                cwd=str(PROJECT_ROOT.parent),
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            short = (hash_res.stdout or "").strip()
+            if hash_res.returncode == 0 and short:
+                return f"{count}-{short}"
+            return count
     except Exception:
         pass
     try:
@@ -141,6 +154,11 @@ def _resolve_agent_version() -> str:
 
 
 AGENT_VERSION = _resolve_agent_version()
+
+# ========== 意图测试模式 ==========
+# INTENT_TEST_MODE=1 测试模式：前端 intent 不参与路由，classify 用 LLM 自己分类（用于对比意图识别是否成功）
+# INTENT_TEST_MODE=0 真实模式：前端带合法 intent 时直接用 intent 路由，跳过 LLM 分类
+INTENT_TEST_MODE = os.getenv("INTENT_TEST_MODE", "0") == "1"
 
 # ========== 日志配置 ==========
 LOG_DIR = PROJECT_ROOT.parent / "logs"

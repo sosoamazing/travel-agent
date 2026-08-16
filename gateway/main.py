@@ -304,7 +304,7 @@ async def admin_report_text(_: str = Depends(get_current_admin)) -> Response:
 async def chat(req: ChatRequest, username: str = Depends(get_current_user)) -> ChatResponse:
     r = await _require_client().post(
         "/internal/chat",
-        json={"user_query": req.user_query, "session_id": req.session_id, "user_id": username},
+        json={"user_query": req.user_query, "session_id": req.session_id, "user_id": username, "intent": req.intent},
     )
     if r.status_code >= 400:
         _raise_backend_error(r)
