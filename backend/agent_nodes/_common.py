@@ -347,6 +347,10 @@ class _LLM:
         return self._llm.astream(messages, **kw)
 
     def with_structured_output(self, schema, **kw):
+        # DeepSeek 推理模型(v4-pro)不支持 json_schema / 显式 tool_choice 结构化输出，
+        # 统一改用 function_calling（deepseek-chat 实测支持，保证 schema 字段严格匹配）。
+        # 使用方须确保对应 agent 的模型为支持 function_calling 的模型（如 deepseek-chat）。
+        kw.setdefault("method", "function_calling")
         return self._llm.with_structured_output(schema, **kw)
 
     def bind_tools(self, tools, **kw):
