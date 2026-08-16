@@ -8,6 +8,7 @@ const TABS = [
   { id: 'models', label: '模型 Token' },
   { id: 'cost', label: 'Token 成本' },
   { id: 'tools', label: '工具可靠性' },
+  { id: 'intent', label: '意图识别' },
   { id: 'errors', label: '错误样本' },
   { id: 'tasks', label: '最近任务' },
 ]
@@ -185,6 +186,7 @@ export default function AdminPage({ onLogout }) {
         { label: '任务总数', value: fmtNum(report.task_count), cls: 'm-blue' },
         { label: '成功率', value: fmtRate(report.success_rate), cls: 'm-green' },
         { label: '失败任务', value: fmtNum(report.error_count), cls: 'm-red' },
+        { label: '意图识别', value: fmtRate(report.intent_recognition?.success_rate), cls: 'm-violet' },
         { label: '总 Token', value: fmtNum(report.tokens?.total), cls: 'm-violet' },
         { label: '平均耗时', value: fmtMs(report.duration?.mean), cls: 'm-cyan' },
         { label: 'LLM 调用', value: fmtNum(report.llm_call_count), cls: 'm-orange' },
@@ -492,6 +494,49 @@ export default function AdminPage({ onLogout }) {
     )
   }
 
+  function renderIntent() {
+    const ir = report.intent_recognition || {}
+    const detail = ir.detail || []
+    if (detail.length === 0) return <div className="empty-hint">未查询到数据</div>
+    return (
+      <div className="admin-table-wrap">
+        <div className="intent-summary">
+          <span>
+            总标注 <b>{fmtNum(ir.total)}</b> 条
+          </span>
+          <span>
+            识别一致 <b>{fmtNum(ir.match)}</b> 条
+          </span>
+          <span>
+            识别成功率 <b className={pctToNum(ir.success_rate) >= 80 ? 'cell-ok' : pctToNum(ir.success_rate) >= 50 ? 'cell-warn' : 'cell-danger'}>{fmtRate(ir.success_rate)}</b>
+          </span>
+        </div>
+        <table className="admin-table">
+          <thead>
+            <tr>
+              <th>意图</th>
+              <th>标注数</th>
+              <th>识别一致</th>
+              <th>成功率</th>
+            </tr>
+          </thead>
+          <tbody>
+            {detail.map((d) => (
+              <tr key={d.intent}>
+                <td className="cell-name">{d.intent}</td>
+                <td>{fmtNum(d.total)}</td>
+                <td>{fmtNum(d.match)}</td>
+                <td className={pctToNum(d.rate) >= 80 ? 'cell-ok' : pctToNum(d.rate) >= 50 ? 'cell-warn' : 'cell-danger'}>
+                  {fmtRate(d.rate)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    )
+  }
+
   function renderErrors() {
     const samples = report.error_samples || []
     if (samples.length === 0) return <div className="empty-hint">近期没有错误记录</div>
@@ -723,6 +768,7 @@ export default function AdminPage({ onLogout }) {
                 {activeTab === 'models' && renderModels()}
                 {activeTab === 'cost' && renderCost()}
                 {activeTab === 'tools' && renderTools()}
+                {activeTab === 'intent' && renderIntent()}
                 {activeTab === 'errors' && renderErrors()}
                 {activeTab === 'tasks' && renderTasks()}
               </div>

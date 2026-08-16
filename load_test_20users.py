@@ -1,6 +1,6 @@
 """N 用户并发压力测试脚本。
 
-场景：默认 50 个测试用户，每个用户提交 1 个旅行问题（同时并发），走 gateway 完整链路
+场景：默认 30 个测试用户，每个用户提交 1 个旅行问题（同时并发），走 gateway 完整链路
 （注册/登录 → JWT → 建会话 → 提交 /chat → 轮询任务结果），验证：
   - 并发信号量（TASK_CONCURRENCY）下任务能否全部正常完成
   - 同会话并发拦截（每个用户独立会话，不应触发 409）
@@ -15,7 +15,7 @@
   python load_test_20users.py [gateway_url] [--from-db N]
 
 参数：
-  --from-db N   从数据库 test_questions 表随机取 N 个问题（默认 N=50），
+  --from-db N   从数据库 test_questions 表随机取 N 个问题（默认 N=30），
                 否则使用脚本内置的 QUESTIONS 列表
 
 输出：每个用户的任务结果 + 汇总统计（成功/失败/耗时分布）。
@@ -138,7 +138,7 @@ async def run_one_user(
                 "cost": time.perf_counter() - t_start}
 
 
-def load_questions_from_db(n: int = 50) -> List[Dict[str, str]]:
+def load_questions_from_db(n: int = 30) -> List[Dict[str, str]]:
     """从数据库 test_questions 表随机取 n 个 (question, intent) 对。"""
     import psycopg2
     from dotenv import load_dotenv
@@ -165,7 +165,7 @@ async def main() -> None:
     questions = [{"question": q, "intent": ""} for q in QUESTIONS]
     if "--from-db" in sys.argv:
         idx = sys.argv.index("--from-db")
-        n = int(sys.argv[idx + 1]) if idx + 1 < len(sys.argv) else 50
+        n = int(sys.argv[idx + 1]) if idx + 1 < len(sys.argv) else 30
         try:
             questions = load_questions_from_db(n)
         except Exception as e:

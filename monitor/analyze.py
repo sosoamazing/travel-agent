@@ -620,6 +620,8 @@ def load_from_json() -> List[Dict[str, Any]]:
         "duration_ms": float(summary.get("wall_clock_ms") or 0),
         "status": "ok" if not obs.get("error") else "error",
         "error": obs.get("error"),
+        "intent": obs.get("intent") or "",
+        "query_type": obs.get("query_type") or "",
         "summary": summary,
         "per_node": per_node,
         "per_agent": dict(per_agent),
@@ -825,6 +827,32 @@ def build_report(tasks: List[Dict[str, Any]]) -> Dict[str, Any]:
     replan_count = max(0, route_calls - plan_tasks)
     replan_rate = round(replan_count / plan_tasks * 100, 1) if plan_tasks else 0.0
 
+    # 意图识别统计：有 intent 标注的任务中，classify 分类结果 query_type 与标注一致的比例
+    intent_total = 0
+    intent_match = 0
+    intent_by_type: Dict[str, Dict[str, int]] = defaultdict(lambda: {"total": 0, "match": 0})
+    for t in tasks:
+        it = (t.get("intent") or "").strip()
+        if not it:
+            continue
+        intent_total += 1
+        qt = (t.get("query_type") or "").strip()
+        if qt == it:
+            intent_match += 1
+        intent_by_type[it]["total"] += 1
+        if qt == it:
+            intent_by_type[it]["match"] += 1
+    intent_success_rate = round(intent_match / intent_total * 100, 1) if intent_total else 0.0
+    intent_detail = [
+        {
+            "intent": it,
+            "total": v["total"],
+            "match": v["match"],
+            "rate": round(v["match"] / v["total"] * 100, 1) if v["total"] else 0.0,
+        }
+        for it, v in sorted(intent_by_type.items())
+    ]
+
     # 错误样本
     samples = []
     for t in tasks:
@@ -848,6 +876,12 @@ def build_report(tasks: List[Dict[str, Any]]) -> Dict[str, Any]:
             "cached": total_cached,
             "total": total_input + total_output,
             "cache_hit_rate": round(total_cached / total_input * 100, 1) if total_input else 0.0,
+        },
+        "intent_recognition": {
+            "total": intent_total,
+            "match": intent_match,
+            "success_rate": intent_success_rate,
+            "detail": intent_detail,
         },
         "llm_call_count": total_llm_calls,
         "tool_call_count": total_tool_calls,
