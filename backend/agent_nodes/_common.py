@@ -193,9 +193,17 @@ def _extract_usage(msg) -> tuple:
         um = getattr(msg, "usage_metadata", None) or {}
         inp = um.get("input_tokens", 0) or 0
         out = um.get("output_tokens", 0) or 0
+        # 缓存命中：优先 LangChain usage_metadata 的 input_token_details.cache_read
+        # （流式路径 response_metadata 为空，缓存信息只在这里；DeepSeek 的
+        #   prompt_tokens_details.cached_tokens 会被 LangChain 映射为 cache_read）
+        cached = (um.get("input_token_details") or {}).get("cache_read")
+        if cached is None:
+            cached = (um.get("prompt_token_details") or {}).get("cached_tokens")
+        # 其次从 response_metadata 的原始 usage 提取（非流式路径）
         rm = getattr(msg, "response_metadata", None) or {}
         usage = rm.get("token_usage") or rm.get("usage") or {}
-        cached = usage.get("prompt_cache_hit_tokens")
+        if cached is None:
+            cached = usage.get("prompt_cache_hit_tokens")
         if cached is None:
             details = usage.get("input_tokens_details") or usage.get("prompt_tokens_details") or {}
             cached = details.get("cached_tokens")

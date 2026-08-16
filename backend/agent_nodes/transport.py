@@ -269,9 +269,9 @@ async def _decide_transport_mode(
 - 若用户明确要求自驾/开车，选 driving
 - 只输出一个词：train 或 driving
 
+出行人数：{persons}人
 路线：{from_city} → {to_city}
 用户查询：{user_query}
-出行人数：{persons}人
 
 【方案1：火车】
 {train_brief}
@@ -422,7 +422,7 @@ async def _extract_transport_cost(raw: str, user_query: str, from_city: str, to_
 
 用户查询：{user_query}
 查询结果（节选）：
-{text[:2000]}
+{text}
 """
     try:
         resp = await llm.ainvoke([HumanMessage(content=prompt)])

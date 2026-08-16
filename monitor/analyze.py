@@ -658,7 +658,7 @@ def build_report(tasks: List[Dict[str, Any]]) -> Dict[str, Any]:
             "llm_input_tokens": l["input"],
             "llm_output_tokens": l["output"],
             "llm_cached_tokens": l["cached"],
-            "llm_duration_ms": round(l["dur"], 2),
+            "llm_duration_ms": round(l["dur"] / l["llm_calls"], 2) if l["llm_calls"] else 0.0,
             "llm_errors": l["errors"],
             "llm_cache_hit_rate": round(l["cached"] / l["input"] * 100, 1) if l["input"] else 0.0,
         })

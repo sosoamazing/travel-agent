@@ -29,7 +29,6 @@ from agent_nodes import (
     transport_select_node,
     budget_fail_node,
     city_budget_allocation_node,
-    plan_all_cities_concurrent_node,
     summarizer_node,
 )
 import logging
@@ -81,16 +80,6 @@ def route_transport(state):
     return target
 
 
-def route_after_concurrent(state):
-    """并发城内规划完成：超预算(汇总后) → budget_fail；否则 → summarizer"""
-    over = bool(state.get("over_budget"))
-    target = "budget_fail" if over else "summarizer"
-    spent = float(state.get("spent_budget", 0) or 0)
-    total = float(state.get("total_budget", 0) or 0)
-    logger.info(f"🔀 [route_after_concurrent] over_budget={over}, spent={spent:.0f}/{total:.0f} → {target}")
-    return target
-
-
 # ═══════════════════════════════════════════════════════════
 # 主图
 # ═══════════════════════════════════════════════════════════
@@ -117,7 +106,6 @@ def create_travel_planning_graph(checkpointer=None):
     workflow.add_node("transport_select", transport_select_node)
     workflow.add_node("budget_fail", budget_fail_node)
     workflow.add_node("city_budget_allocation", city_budget_allocation_node)
-    workflow.add_node("plan_all_cities_concurrent", plan_all_cities_concurrent_node)
     workflow.add_node("summarizer", summarizer_node)
 
     # ── 入口 ──
@@ -165,17 +153,8 @@ def create_travel_planning_graph(checkpointer=None):
     # ── 选定交通计划 → 按城市分配剩余预算 ──
     workflow.add_edge("transport_select", "city_budget_allocation")
 
-    # ── 预算分配（跨城 & 市内旅游都会走这里）→ 全城市并发城内 ──
-    workflow.add_edge("city_budget_allocation", "plan_all_cities_concurrent")
-
-    # ── 并发城内规划完成 → 超预算终止 / 总结 ──
-    workflow.add_conditional_edges(
-        "plan_all_cities_concurrent", route_after_concurrent,
-        {
-            "budget_fail": "budget_fail",
-            "summarizer": "summarizer",
-        },
-    )
+    # ── 预算分配（跨城 & 市内旅游都会走这里）→ 总结（预算方案，不再生成具体城市行程）──
+    workflow.add_edge("city_budget_allocation", "summarizer")
 
     workflow.add_edge("summarizer", END)
 

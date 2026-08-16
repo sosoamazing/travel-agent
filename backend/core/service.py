@@ -42,8 +42,7 @@ logger = logging.getLogger(__name__)
 _NODE_NAMES = {
     "classify", "conversation_reply", "handle_feedback", "information_query",
     "extract_params", "ask_clarification", "simple_rag_search", "transport_check",
-    "transport_select", "budget_fail", "city_budget_allocation",
-    "plan_all_cities_concurrent", "summarizer",
+    "transport_select", "budget_fail", "city_budget_allocation", "summarizer",
 }
 
 # 已完成任务的内存保留时间（秒），超过后在新建任务时惰性清理，避免内存无限增长

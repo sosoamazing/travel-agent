@@ -23,7 +23,7 @@ async def _parse_cities_llm(user_query: str, destination: str, origin: str) -> L
     llm = _LLM(agent="params", temperature=0.0)
     prompt = (f"从用户旅行查询中提取要游览的城市列表（按游览顺序排列）。\n"
               f"规则：\n"
-              f"- 若用户明确要在出发地 '{origin}' 游览（如'先在本地玩几天再去...'），则将出发地作为第一个城市\n"
+              f"- 若用户明确要在出发地游览（如'先在本地玩几天再去...'），则将出发地作为第一个城市\n"
               f"- 若出发地仅是起点不游览，则不要包含出发地\n"
               f"- 只返回城市名，用逗号分隔，例如：上海,苏州,杭州。若只有一个城市就返回一个。\n"
               f"\n"
