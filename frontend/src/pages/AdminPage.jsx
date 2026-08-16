@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { Fragment, useCallback, useEffect, useState } from 'react'
 import { api } from '../api'
 import { clearAuth, getRole, getUsername } from '../auth'
 
@@ -94,6 +94,7 @@ export default function AdminPage({ onLogout }) {
   const [createError, setCreateError] = useState('')
   const [creating, setCreating] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState('')
+  const [expandedNodes, setExpandedNodes] = useState(() => new Set())
 
   const loadReport = useCallback(async (ver = '') => {
     setReportLoading(true)
@@ -163,6 +164,16 @@ export default function AdminPage({ onLogout }) {
     loadReport(e.target.value)
   }
 
+  // 切换节点展开/收起（不可变更新 Set）
+  function toggleNode(node) {
+    setExpandedNodes((prev) => {
+      const next = new Set(prev)
+      if (next.has(node)) next.delete(node)
+      else next.add(node)
+      return next
+    })
+  }
+
   function handleLogout() {
     clearAuth()
     onLogout()
@@ -208,36 +219,98 @@ export default function AdminPage({ onLogout }) {
             </tr>
           </thead>
           <tbody>
-            {nodes.map((n) => (
-              <tr key={n.node}>
-                <td className="cell-name">{n.node}</td>
-                <td>{fmtNum(n.count)}</td>
-                <td>
-                  <span
-                    className="heat-cell"
-                    style={{ '--heat': Math.min(1, (Number(n.mean_ms) || 0) / maxMean) }}
-                  >
-                    {fmtMs(n.mean_ms)}
-                  </span>
-                </td>
-                <td>
-                  <span
-                    className="heat-cell"
-                    style={{ '--heat': Math.min(1, (Number(n.p95_ms) || 0) / maxP95) }}
-                  >
-                    {fmtMs(n.p95_ms)}
-                  </span>
-                </td>
-                <td className={n.errors ? 'cell-danger' : ''}>{fmtNum(n.errors)}</td>
-                <td>{fmtNum(n.llm_calls)}</td>
-                <td>{fmtNum(n.mcp_calls)}</td>
-                <td>{fmtNum(n.llm_input_tokens)}</td>
-                <td>{fmtNum(n.llm_output_tokens)}</td>
-                <td>{fmtPct(n.llm_cache_hit_rate)}</td>
-                <td>{fmtMs(n.llm_duration_ms)}</td>
-                <td className={n.llm_errors ? 'cell-danger' : ''}>{fmtNum(n.llm_errors)}</td>
-              </tr>
-            ))}
+            {nodes.map((n) => {
+              const agents = n.llm_agents || []
+              const isOpen = expandedNodes.has(n.node)
+              return (
+                <Fragment key={n.node}>
+                  <tr className={isOpen ? 'node-row-open' : ''}>
+                    <td className="cell-name">
+                      {agents.length > 0 ? (
+                        <button
+                          type="button"
+                          className={`node-expand${isOpen ? ' open' : ''}`}
+                          onClick={() => toggleNode(n.node)}
+                          aria-expanded={isOpen}
+                          aria-label={`展开 ${n.node} 的 Agent 明细`}
+                        >
+                          <span className="node-expand-icon">▸</span>
+                          <span>{n.node}</span>
+                        </button>
+                      ) : (
+                        n.node
+                      )}
+                    </td>
+                    <td>{fmtNum(n.count)}</td>
+                    <td>
+                      <span
+                        className="heat-cell"
+                        style={{ '--heat': Math.min(1, (Number(n.mean_ms) || 0) / maxMean) }}
+                      >
+                        {fmtMs(n.mean_ms)}
+                      </span>
+                    </td>
+                    <td>
+                      <span
+                        className="heat-cell"
+                        style={{ '--heat': Math.min(1, (Number(n.p95_ms) || 0) / maxP95) }}
+                      >
+                        {fmtMs(n.p95_ms)}
+                      </span>
+                    </td>
+                    <td className={n.errors ? 'cell-danger' : ''}>{fmtNum(n.errors)}</td>
+                    <td>{fmtNum(n.llm_calls)}</td>
+                    <td>{fmtNum(n.mcp_calls)}</td>
+                    <td>{fmtNum(n.llm_input_tokens)}</td>
+                    <td>{fmtNum(n.llm_output_tokens)}</td>
+                    <td>{fmtPct(n.llm_cache_hit_rate)}</td>
+                    <td>{fmtMs(n.llm_duration_ms)}</td>
+                    <td className={n.llm_errors ? 'cell-danger' : ''}>{fmtNum(n.llm_errors)}</td>
+                  </tr>
+                  {isOpen && (
+                    <tr className="node-sub-row">
+                      <td className="node-sub-cell" colSpan={12}>
+                        <div className="agent-sub-title">Agent 明细（{agents.length}）</div>
+                        <div className="agent-sub-wrap">
+                          <table className="admin-table agent-sub-table">
+                            <thead>
+                              <tr>
+                                <th>Agent</th>
+                                <th>模型</th>
+                                <th>调用次数</th>
+                                <th>输入 Token</th>
+                                <th>输出 Token</th>
+                                <th>缓存 Token</th>
+                                <th>缓存命中率</th>
+                                <th>平均耗时</th>
+                                <th>错误数</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {agents.map((a) => (
+                                <tr key={a.agent}>
+                                  <td className="cell-name">{a.agent}</td>
+                                  <td className="cell-tool">{a.model || '—'}</td>
+                                  <td>{fmtNum(a.calls)}</td>
+                                  <td>{fmtNum(a.input_tokens)}</td>
+                                  <td>{fmtNum(a.output_tokens)}</td>
+                                  <td>{fmtNum(a.cached_input_tokens)}</td>
+                                  <td>{fmtPct(a.cache_hit_rate)}</td>
+                                  <td>{fmtMs(a.duration_ms)}</td>
+                                  <td className={a.error_count ? 'cell-danger' : ''}>
+                                    {fmtNum(a.error_count)}
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
+              )
+            })}
           </tbody>
         </table>
       </div>

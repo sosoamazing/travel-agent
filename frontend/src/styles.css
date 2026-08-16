@@ -960,6 +960,86 @@ button {
   font-variant-numeric: tabular-nums;
 }
 
+/* 节点展开 / Agent 明细 */
+.node-expand {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+
+.node-expand-icon {
+  display: inline-block;
+  width: 12px;
+  flex-shrink: 0;
+  font-size: 11px;
+  line-height: 1;
+  color: #86909c;
+  transition: transform 0.15s ease, color 0.15s ease;
+  user-select: none;
+}
+
+.node-expand:hover .node-expand-icon,
+.node-expand.open .node-expand-icon {
+  color: #165dff;
+}
+
+.node-expand.open .node-expand-icon {
+  transform: rotate(90deg);
+}
+
+.node-row-open td,
+.node-sub-row td {
+  background: #f7f9fc;
+}
+
+.node-sub-row td {
+  padding-top: 8px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #e5e6eb;
+}
+
+.agent-sub-title {
+  margin: 2px 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #4e5969;
+}
+
+.agent-sub-wrap {
+  max-width: 100%;
+  overflow-x: auto;
+  border: 1px solid #e5e6eb;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.agent-sub-table {
+  min-width: 720px;
+}
+
+.agent-sub-table th {
+  font-size: 11px;
+  padding: 7px 10px;
+  white-space: nowrap;
+}
+
+.agent-sub-table td {
+  padding: 7px 10px;
+  font-size: 12px;
+}
+
+.agent-sub-table .cell-tool {
+  white-space: nowrap;
+}
+
 .pct-cell {
   display: flex;
   align-items: center;

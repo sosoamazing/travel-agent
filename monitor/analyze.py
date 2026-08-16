@@ -334,6 +334,26 @@ def load_from_db(limit: int = 50, version: Optional[str] = None) -> List[Dict[st
                 item["duration_ms"] = round(item["duration_ms"], 2)
             node_tools.sort(key=lambda x: x["calls"], reverse=True)
 
+            # 节点内 per-agent LLM 明细（透传，供前端按 agent 下钻）
+            node_agents = []
+            for l in child_llm:
+                calls = int(l.get("calls") or 0)
+                input_tokens = int(calls * float(l.get("input_tokens_avg") or 0))
+                output_tokens = int(calls * float(l.get("output_tokens_avg") or 0))
+                cached_input_tokens = int(calls * float(l.get("cached_tokens_avg") or 0))
+                node_agents.append({
+                    "agent": l.get("agent") or "unknown",
+                    "model": l.get("model") or "unknown",
+                    "calls": calls,
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "cached_input_tokens": cached_input_tokens,
+                    "cache_hit_rate": round(cached_input_tokens / input_tokens * 100, 1) if input_tokens > 0 else 0.0,
+                    "duration_ms": round(float(l.get("duration_ms_avg") or 0), 2),
+                    "error_count": int(l.get("error_count") or 0),
+                })
+            node_agents.sort(key=lambda x: x["input_tokens"] + x["output_tokens"], reverse=True)
+
             per_node[name] = {
                 "invocations": int(nr.get("invocations") or 1),
                 "duration_ms": float(nr.get("duration_ms_avg") or 0),
@@ -350,6 +370,7 @@ def load_from_db(limit: int = 50, version: Optional[str] = None) -> List[Dict[st
                     "cache_hit_rate": round(llm_cached / llm_input, 4) if llm_input > 0 else None,
                 },
                 "tools": node_tools,
+                "llm_agents": node_agents,
             }
 
         # per_agent / per_model / llm_errors
@@ -631,6 +652,8 @@ def build_report(tasks: List[Dict[str, Any]]) -> Dict[str, Any]:
         lambda: {"llm_calls": 0, "mcp_calls": 0, "input": 0, "output": 0,
                  "cached": 0, "dur": 0.0, "errors": 0}
     )
+    # 节点内 per-agent LLM 明细（跨任务按节点名聚合，key 用 agent 名）
+    node_agents: Dict[str, Dict[str, Any]] = defaultdict(dict)
     for t in tasks:
         for name, d in t["per_node"].items():
             node_stats[name].append(d["duration_ms"])
@@ -646,10 +669,32 @@ def build_report(tasks: List[Dict[str, Any]]) -> Dict[str, Any]:
             node_llm[name]["cached"] += llm.get("cached_input_tokens", 0)
             node_llm[name]["dur"] += llm.get("duration_ms", 0)
             node_llm[name]["errors"] += llm.get("error_count", 0)
+            for a in d.get("llm_agents", []):
+                agent = a.get("agent") or "unknown"
+                item = node_agents[name].get(agent)
+                if item is None:
+                    item = {
+                        "agent": agent, "model": a.get("model") or "unknown",
+                        "calls": 0, "input_tokens": 0, "output_tokens": 0,
+                        "cached_input_tokens": 0, "duration_ms": 0.0, "error_count": 0,
+                    }
+                    node_agents[name][agent] = item
+                item["calls"] += a.get("calls", 0)
+                item["input_tokens"] += a.get("input_tokens", 0)
+                item["output_tokens"] += a.get("output_tokens", 0)
+                item["cached_input_tokens"] += a.get("cached_input_tokens", 0)
+                item["duration_ms"] += a.get("calls", 0) * a.get("duration_ms", 0)
+                item["error_count"] += a.get("error_count", 0)
     node_heatmap = []
     for name, durs in node_stats.items():
         s = stats(durs)
         l = node_llm[name]
+        # 该节点的 per-agent 明细：耗时取整到 2 位、重算缓存命中率、按 token 量降序
+        agents = list(node_agents.get(name, {}).values())
+        for ag in agents:
+            ag["duration_ms"] = round(ag["duration_ms"] / ag["calls"], 2) if ag["calls"] else 0.0
+            ag["cache_hit_rate"] = round(ag["cached_input_tokens"] / ag["input_tokens"] * 100, 1) if ag["input_tokens"] else 0.0
+        agents.sort(key=lambda x: x["input_tokens"] + x["output_tokens"], reverse=True)
         node_heatmap.append({
             "node": name, "mean_ms": s["mean"], "p95_ms": s["p95"],
             "count": node_invocations.get(name, s["count"]), "errors": node_err.get(name, 0),
@@ -661,6 +706,7 @@ def build_report(tasks: List[Dict[str, Any]]) -> Dict[str, Any]:
             "llm_duration_ms": round(l["dur"] / l["llm_calls"], 2) if l["llm_calls"] else 0.0,
             "llm_errors": l["errors"],
             "llm_cache_hit_rate": round(l["cached"] / l["input"] * 100, 1) if l["input"] else 0.0,
+            "llm_agents": agents,
         })
     node_heatmap.sort(key=lambda x: x["mean_ms"], reverse=True)
 
