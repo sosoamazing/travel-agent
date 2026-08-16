@@ -147,8 +147,8 @@ export default function ChatPage({ onLogout }) {
 
       await streamChat(task_id, {
         onToken: (t) => {
-          finalText = t
-          updateAssistant(t)
+          finalText += t
+          updateAssistant(finalText)
         },
         onProgress: (node) => setProgress(`正在执行 ${node}`),
         onFinal: (evt) => {

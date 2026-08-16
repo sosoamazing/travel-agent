@@ -217,6 +217,14 @@ class TaskManager:
         with self._lock:
             return self._tasks.get(task_id)
 
+    def has_active_for_session(self, session_id: str) -> bool:
+        """该会话是否有进行中的任务（pending/running），用于拒绝同会话并发提交。"""
+        with self._lock:
+            return any(
+                r.session_id == session_id and r.status in ("pending", "running")
+                for r in self._tasks.values()
+            )
+
     def _prune_locked(self) -> None:
         """清理已结束且过期的任务，控制内存占用。"""
         now = time.time()
@@ -234,6 +242,9 @@ class TravelService:
     def __init__(self):
         self.tasks = TaskManager()
         self.chat_manager = get_chat_history_manager()
+        # 全局并发上限：同时执行的工作流任务数（超出排队等待），
+        # 避免高并发下打爆 LLM rate limit / 数据库连接池 / 内存
+        self._concurrency_sem = asyncio.Semaphore(int(os.getenv("TASK_CONCURRENCY", "10")))
         # 预热 memory 单例（lazy 单例，首次访问即初始化，避免首问额外延迟）
         get_memory_manager()
         self._init_mcp()
@@ -337,6 +348,9 @@ class TravelService:
         user_id = user_id or _DEFAULT_USER_ID
         if not session_id:
             session_id = await self.create_session(user_id=user_id)
+        # 同会话有进行中的任务时拒绝新请求，避免历史并发写冲突（检查先于消息持久化）
+        if self.tasks.has_active_for_session(session_id):
+            raise RuntimeError("该会话有进行中的任务，请等待完成后再发送")
         await self.add_message(session_id=session_id, message_type="user",
                                content=user_query, user_id=user_id)
 
@@ -408,7 +422,11 @@ class TravelService:
         result: Optional[Dict[str, Any]] = None
         ok = False
         started_obs = False
+        sem_acquired = False
         try:
+            # 并发上限：超出后排队等待（acquire 在 try 内，被取消时不会误 release）
+            await self._concurrency_sem.acquire()
+            sem_acquired = True
             # 观测上下文：contextvars 保证与其它并发任务隔离
             reset_observability()
             _token_tracker.reset()
@@ -446,7 +464,8 @@ class TravelService:
                     if token:
                         accumulated += token
                         record.progress_message = "生成回复中"
-                        await record.queue.put({"type": "token", "text": accumulated})
+                        # 只发增量 token，避免 SSE 全量重传的 O(n²) 浪费（前端自行拼接）
+                        await record.queue.put({"type": "token", "text": token})
 
                 elif kind == "on_chain_end" and name == "LangGraph":
                     result = event["data"]["output"]
@@ -510,6 +529,8 @@ class TravelService:
             except Exception:
                 pass
         finally:
+            if sem_acquired:
+                self._concurrency_sem.release()
             if ok and started_obs:
                 await end_task("ok")
             record.finished_at = time.time()

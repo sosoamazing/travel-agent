@@ -303,7 +303,8 @@ class MCPToolManager:
             fut = asyncio.run_coroutine_threadsafe(
                 self._list_tools_on_mcp_loop(server_name), _mcp_loop
             )
-            return fut.result()
+            # 异步等待，避免 fut.result() 同步阻塞事件循环
+            return await asyncio.wait_for(asyncio.wrap_future(fut), timeout=MCP_TIMEOUT_SEC)
         return await self._list_tools_on_mcp_loop(server_name)
 
     async def _list_tools_on_mcp_loop(self, server_name: str) -> List[str]:
@@ -333,7 +334,8 @@ class MCPToolManager:
         if _mcp_loop is not None and asyncio.get_running_loop() is not _mcp_loop:
             fut = asyncio.run_coroutine_threadsafe(self._cleanup_on_mcp_loop(), _mcp_loop)
             try:
-                fut.result()
+                # 异步等待，避免 fut.result() 同步阻塞事件循环
+                await asyncio.wait_for(asyncio.wrap_future(fut), timeout=MCP_TIMEOUT_SEC)
             except Exception:
                 pass
             return

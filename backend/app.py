@@ -208,7 +208,7 @@ if user_query := st.chat_input(placeholder="请输入您的旅行需求，例如
             for event in _stream_chat(task_id):
                 etype = event.get("type")
                 if etype == "token":
-                    full_response = event.get("text", "")
+                    full_response += event.get("text", "")
                     placeholder.markdown(full_response + "▌")
                 elif etype == "progress":
                     status_placeholder.caption(f"⏳ {event.get('node', '')}")

@@ -237,11 +237,15 @@ async def chat(req: _ChatReq) -> Dict[str, Any]:
     """提交对话：立即返回 task_id，后台异步执行 LangGraph 工作流。"""
     if req.session_id:
         await _require_session_owner(req.session_id, req.user_id)
-    task_id = await get_service().submit_chat(
-        user_query=req.user_query,
-        session_id=req.session_id,
-        user_id=req.user_id,
-    )
+    try:
+        task_id = await get_service().submit_chat(
+            user_query=req.user_query,
+            session_id=req.session_id,
+            user_id=req.user_id,
+        )
+    except RuntimeError as e:
+        # 同会话有进行中的任务 → 409，前端提示等待
+        raise HTTPException(status_code=409, detail=str(e))
     return {"task_id": task_id}
 
 
