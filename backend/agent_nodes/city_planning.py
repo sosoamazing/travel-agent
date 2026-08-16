@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 from langchain_core.messages import HumanMessage
 
 from tools.rag_tool import query_travel_knowledge
-from tools.registry.gaode import _unwrap_gaode
+from tools.registry.gaode import _unwrap_gaode, resolve_geo_location
 from config.settings import PLAN_MAX_REPLAN, CITY_PLAN_MAX_CONCURRENCY
 from ._common import _LLM, _call_mcp_tool
 from ._observability import node, node_scope
@@ -128,8 +128,8 @@ async def _query_leg_distance(origin_loc: str, dest_loc: str) -> float:
         return -1.0
     try:
         raw = await _call_mcp_tool("gaode_driving", origin=origin_loc, destination=dest_loc)
-        data = json.loads(raw) if isinstance(raw, str) else raw
-        data = _unwrap_gaode(data)  # 兼容 {"return": [{...}]} 新结构
+        # _unwrap_gaode 统一解包：字符串 json / {"return":[...]} / {"type":"text","text":"{json}"} 多层包装
+        data = _unwrap_gaode(raw)
         # 高德返回结构 route.paths[0].distance（米）
         paths = None
         if isinstance(data, dict):
@@ -140,7 +140,7 @@ async def _query_leg_distance(origin_loc: str, dest_loc: str) -> float:
         # 兜底：让 LLM 解析
         llm = _LLM(agent="route_distance", temperature=0.0)
         resp = await llm.ainvoke([HumanMessage(
-            content=f"从以下高德驾车路线结果中提取距离（公里）。只输出数字。\n{str(raw)[:1000]}"
+            content=f"从以下高德驾车路线结果中提取距离（公里）。只输出数字。\n{str(raw)}"
         )])
         m = re.search(r"\d+(?:\.\d+)?", resp.content)
         return float(m.group()) if m else -1.0
@@ -542,6 +542,16 @@ async def _extract_hotels(hotel_raw: str, city: str, planner_context: Dict,
         for h in hotels_raw
     )
     logger.info(f"💰 [{city}] Flash 估价完成（{len(hotels_raw)} 个{date_str}）：{hotels_brief_log}")
+
+    # 高德 POI 不带 location 字段，用地理编码（maps_geo）为缺失坐标的酒店补全经纬度。
+    # 用 address（而非 name）做关键字：酒店名重复度高，地址更精确。
+    for h in hotels_raw:
+        if not (h.get("location") or "").strip():
+            addr = (h.get("address") or "").strip()
+            if addr:
+                loc = await resolve_geo_location(f"{addr} {city}")
+                if loc:
+                    h["location"] = loc
     return hotels_raw
 
 
@@ -1031,11 +1041,18 @@ async def _run_one_city_inner(
 
     # --- Step A: attractions_search ---
     rag_raw = await query_travel_knowledge(f"{city} 景点 攻略")
-    poi_raw = await _call_mcp_tool("gaode_poi_search", keywords=f"{city} 景点", city=city)
+    poi_raw = await _call_mcp_tool("gaode_poi_search_lite", keywords=f"{city} 景点", city=city)
     attractions = await _extract_attractions(
         rag_raw, poi_raw, city, preferences, user_query,
         few_shot=pc.get("memory_fewshot", "") or "",
     )
+    # 高德 POI 不带 location 字段，这里用地理编码（maps_geo）为缺失坐标的景点补全经纬度，
+    # 保证后续驾车距离查询 _query_leg_distance 有可用的输入坐标
+    for a in attractions:
+        if not (a.get("location") or "").strip():
+            loc = await resolve_geo_location(f"{a.get('name', '')} {city}")
+            if loc:
+                a["location"] = loc
     att_brief = ", ".join(
         f"{a.get('name','?')}({a.get('ticket_price',0):.0f}元)" for a in attractions
     )
@@ -1128,7 +1145,7 @@ async def _run_one_city_inner(
         "city_plan": city_plan,
         "tool_results": [
             {"tool": "rag_search", "result": rag_raw, "city": city},
-            {"tool": "gaode_poi_search", "result": poi_raw, "city": city},
+            {"tool": "gaode_poi_search_lite", "result": poi_raw, "city": city},
             {"tool": "gaode_hotel_search", "result": hotel_raw, "city": city},
         ],
     }

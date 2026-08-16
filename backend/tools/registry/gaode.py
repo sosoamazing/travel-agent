@@ -32,34 +32,53 @@ def _unwrap_gaode(data: Any) -> Any:
     新版 ModelScope 高德 MCP 把所有结果统一包在 `return` 数组里（如 maps_geo 返回
     `{"return": [{"location": "...", ...}]}`）。本函数把 `return[0]` 解出来；
     老结构或非高德结构直接透传。
+
+    另兼容部分高德 MCP 返回的 `{"type":"text","text":"{json字符串}"}` 两层包装
+    （text 字段里嵌套实际 JSON），递归解包直到取到真正的数据。
     """
+    if isinstance(data, str):
+        try:
+            data = json.loads(data)
+        except (ValueError, TypeError):
+            return data
     if isinstance(data, dict):
-        ret = data.get("return")
+        # 递归解包 {"type":"text","text":"{json}"} 多层包装
+        while isinstance(data, dict) and "text" in data and isinstance(data.get("text"), str):
+            try:
+                data = json.loads(data["text"])
+            except (ValueError, TypeError):
+                break
+        ret = data.get("return") if isinstance(data, dict) else None
         if isinstance(ret, list) and ret:
             return ret[0]
     return data
 
 
+async def resolve_geo_location(address: str) -> str:
+    """地址/城市名 → 经纬度 "lng,lat"（走 maps_geo，带缓存），失败返回 ""。"""
+    if not address:
+        return ""
+    address = address.strip()
+    if address in _geo_cache:
+        return _geo_cache[address]
+    try:
+        from tools.mcp_tools import get_mcp_manager
+        manager = await get_mcp_manager()
+        raw = await manager.call_tool("Gaode Server", "maps_geo", address=address)
+        data = _unwrap_gaode(raw)
+        loc = data.get("location", "") if isinstance(data, dict) else ""
+        if loc:
+            _geo_cache[address] = loc
+            return loc
+    except Exception:
+        pass
+    return ""
+
+
 async def _query_driving_details(manager, from_city: str, to_city: str) -> Dict[str, float]:
     """查询两城市间驾车距离（公里）和耗时（小时），失败返回空 dict"""
-    async def _get_loc(city: str) -> str:
-        if city in _geo_cache:
-            return _geo_cache[city]
-        raw = await manager.call_tool("Gaode Server", "maps_geo", address=city)
-        try:
-            data = json.loads(raw) if isinstance(raw, str) else raw
-            data = _unwrap_gaode(data)
-            if isinstance(data, dict):
-                loc = data.get("location", "")
-                if loc:
-                    _geo_cache[city] = loc
-                    return loc
-        except Exception:
-            pass
-        return ""
-
-    from_loc = await _get_loc(from_city)
-    to_loc = await _get_loc(to_city)
+    from_loc = await resolve_geo_location(from_city)
+    to_loc = await resolve_geo_location(to_city)
     if not from_loc or not to_loc:
         return {}
 
@@ -109,10 +128,10 @@ def _calc_driving_cost(distance_km: float) -> Tuple[float, Dict[str, float]]:
 # ═══════════════════════════════════════════════════════════
 
 async def poi_search_handler(**kwargs) -> str:
-    """POI 精简搜索 handler：调用高德 maps_text_search 后只保留 name/address/typecode。
+    """POI 搜索 handler：调用高德 maps_text_search，只去掉 photos 等大字段，其余字段全保留。
 
-    与 gaode_poi_search 等价，但返回结果仅含 name、address、typecode 三个字段，
-    丢弃 id、photos 等冗余字段，减少 token 占用。
+    保留 id（供 gaode_detail_search 查详情）、name、address、typecode、location 等，
+    仅丢弃 photos 等体积大且对 LLM 无用的字段，减少 token 占用。
     """
     from tools.mcp_tools import get_mcp_manager
     manager = await get_mcp_manager()
@@ -143,25 +162,24 @@ async def poi_search_handler(**kwargs) -> str:
     except Exception:
         pois = []
 
-    # 只保留 name / address / typecode 三个字段
+    # 只去掉 photos 字段，其余字段全保留
     filtered = []
     for p in pois:
         if not isinstance(p, dict):
             continue
-        filtered.append({
-            "name": p.get("name", ""),
-            "address": p.get("address", ""),
-            "typecode": p.get("typecode", ""),
-        })
+        item = {k: v for k, v in p.items() if k != "photos"}
+        filtered.append(item)
 
     # 从 PostgreSQL 字典表取出 typecode 的中文描述，替换 typecode 字段（DB 不可用时保留原码）
     from tools.typecode_db import aget_typecode_desc
     for item in filtered:
-        desc = await aget_typecode_desc(item["typecode"])
-        if desc:
-            item["typecode"] = desc
+        tc = item.get("typecode", "")
+        if tc:
+            desc = await aget_typecode_desc(tc)
+            if desc:
+                item["typecode"] = desc
 
-    logger.info(f"  🔍 POI精简搜索 {keywords} ({city}): 共 {len(filtered)} 条结果")
+    logger.info(f"  🔍 POI搜索 {keywords} ({city}): 共 {len(filtered)} 条结果")
     return json.dumps(filtered, ensure_ascii=False)
 
 
@@ -204,7 +222,7 @@ GAODE_TOOLS = [
     # ── 本地精简工具：POI 搜索只返回 name/address/typecode ──
     ToolDefinition(
         name="gaode_poi_search_lite",
-        description="搜索高德地图的POI（兴趣点）信息，获取实时的景点、餐厅、购物等地点信息。当需要查找具体的景点、餐厅、购物场所时使用。返回结果仅含名称、地址、类型码三个字段，比gaode_poi_search更精简。",
+        description="搜索高德地图的POI（兴趣点）信息，获取实时的景点、餐厅、购物等地点信息。当需要查找具体的景点、餐厅、购物场所时使用。返回结果保留 id/name/address/typecode/location 等字段，仅去掉 photos 等大字段以减少 token 占用。",
         parameters={
             "type": "object",
             "properties": {
@@ -279,20 +297,21 @@ GAODE_TOOLS = [
         mcp_tool_name="maps_direction_driving"
     ),
 
-    ToolDefinition(
-        name="gaode_regeo",
-        description="逆地理编码：将经纬度坐标转换为具体地址信息（省/市/区/街道）。当需要根据坐标确定具体位置时使用。",
-        parameters={
-            "type": "object",
-            "properties": {
-                "location": {"type": "string", "description": "经纬度坐标，格式：'经度,纬度'，例如：'116.397428,39.90923'"}
-            },
-            "required": ["location"]
-        },
-        tool_type="mcp",
-        server_name="Gaode Server",
-        mcp_tool_name="maps_regeocode"
-    ),
+    # gaode_regeo 逆地理编码：当前无调用方，暂注释保留（如需坐标→地址可恢复）
+    # ToolDefinition(
+    #     name="gaode_regeo",
+    #     description="逆地理编码：将经纬度坐标转换为具体地址信息（省/市/区/街道）。当需要根据坐标确定具体位置时使用。",
+    #     parameters={
+    #         "type": "object",
+    #         "properties": {
+    #             "location": {"type": "string", "description": "经纬度坐标，格式：'经度,纬度'，例如：'116.397428,39.90923'"}
+    #         },
+    #         "required": ["location"]
+    #     },
+    #     tool_type="mcp",
+    #     server_name="Gaode Server",
+    #     mcp_tool_name="maps_regeocode"
+    # ),
 
     ToolDefinition(
         name="gaode_ip_location",
@@ -359,21 +378,22 @@ GAODE_TOOLS = [
         mcp_tool_name="maps_direction_transit_integrated"
     ),
 
-    ToolDefinition(
-        name="gaode_distance",
-        description="距离测量：测量两个经纬度坐标之间的直线距离和预计耗时。适用于快速估算两地的远近程度。",
-        parameters={
-            "type": "object",
-            "properties": {
-                "origin": {"type": "string", "description": "起点坐标（经纬度），格式：'经度,纬度'"},
-                "destination": {"type": "string", "description": "终点坐标（经纬度），格式：'经度,纬度'"}
-            },
-            "required": ["origin", "destination"]
-        },
-        tool_type="mcp",
-        server_name="Gaode Server",
-        mcp_tool_name="maps_distance"
-    ),
+    # gaode_distance 直线测距：当前无调用方（距离查询走 gaode_driving 驾车距离），暂注释保留
+    # ToolDefinition(
+    #     name="gaode_distance",
+    #     description="距离测量：测量两个经纬度坐标之间的直线距离和预计耗时。适用于快速估算两地的远近程度。",
+    #     parameters={
+    #         "type": "object",
+    #         "properties": {
+    #             "origin": {"type": "string", "description": "起点坐标（经纬度），格式：'经度,纬度'"},
+    #             "destination": {"type": "string", "description": "终点坐标（经纬度），格式：'经度,纬度'"}
+    #         },
+    #         "required": ["origin", "destination"]
+    #     },
+    #     tool_type="mcp",
+    #     server_name="Gaode Server",
+    #     mcp_tool_name="maps_distance"
+    # ),
 
     ToolDefinition(
         name="gaode_around_search",
@@ -398,7 +418,7 @@ GAODE_TOOLS = [
         parameters={
             "type": "object",
             "properties": {
-                "id": {"type": "string", "description": "POI ID，从gaode_poi_search或gaode_around_search结果中获取"}
+                "id": {"type": "string", "description": "POI ID，从gaode_poi_search_lite或gaode_around_search结果中获取"}
             },
             "required": ["id"]
         },

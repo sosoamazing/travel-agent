@@ -50,7 +50,7 @@ async def _run_info_tool_call(call: Dict) -> Tuple[str, str]:
 
         elif tool == "poi":
             return tool, await _call_mcp_tool(
-                "gaode_poi_search",
+                "gaode_poi_search_lite",
                 keywords=params.get("keywords", ""),
                 city=params.get("city", ""),
             )

@@ -189,7 +189,7 @@ export default function AdminPage({ onLogout }) {
         { label: '平均耗时', value: fmtMs(report.duration?.mean), cls: 'm-cyan' },
         { label: 'LLM 调用', value: fmtNum(report.llm_call_count), cls: 'm-orange' },
         { label: '工具调用', value: fmtNum(report.tool_call_count), cls: 'm-teal' },
-        { label: '缓存命中率', value: fmtRate(report.tokens?.cache_hit_rate), cls: 'm-slate' },
+        { label: '缓存命中率', value: fmtPct(report.tokens?.cache_hit_rate), cls: 'm-slate' },
       ]
     : []
 
