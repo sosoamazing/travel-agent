@@ -22,7 +22,7 @@ from config.settings import (
     get_agent_model,
 )
 from tools.registry import get_tool_by_name
-from ._observability import record_llm
+from ._observability import start_llm, end_llm
 
 logger = logging.getLogger(__name__)
 
@@ -235,21 +235,19 @@ def _make_tracked_llm(kwargs: Dict[str, Any], agent: str = "unknown") -> ChatOpe
 
     async def _tracked_ainvoke(input, config=None, **kw):
         t0 = time.perf_counter()
+        span_id = await start_llm(agent)
         try:
             msg = await asyncio.wait_for(
                 _orig_ainvoke(input, config=config, **kw),
                 timeout=LLM_TIMEOUT_SEC,
             )
         except asyncio.TimeoutError:
-            record_llm(agent, kwargs.get("model", "unknown"), 0, 0,
-                       (time.perf_counter() - t0) * 1000, status="error",
-                       error=f"timeout: {LLM_TIMEOUT_SEC:g}s")
+            await end_llm(span_id, status="error",
+                          error=f"timeout: {LLM_TIMEOUT_SEC:g}s")
             raise
         except Exception as e:
-            record_llm(agent, kwargs.get("model", "unknown"), 0, 0,
-                       (time.perf_counter() - t0) * 1000, status="error", error=str(e))
+            await end_llm(span_id, status="error", error=str(e))
             raise
-        dur = (time.perf_counter() - t0) * 1000
         inp, out, cached = _extract_usage(msg)
         model = _extract_model(msg, kwargs.get("model", "unknown"))
         content = getattr(msg, "content", "") or ""
@@ -259,8 +257,9 @@ def _make_tracked_llm(kwargs: Dict[str, Any], agent: str = "unknown") -> ChatOpe
                 out = max(1, int(len(str(content)) / 2.5))
         if inp or out:
             _token_tracker.add(model, inp, out, agent=agent, cached_input_tokens=cached)
-        record_llm(agent, model, inp, out, dur, status="ok",
-                   cached_input_tokens=cached, output=str(content))
+        await end_llm(span_id, status="ok",
+                      input_tokens=inp, output_tokens=out, cached_tokens=cached,
+                      output=str(content))
         return msg
 
     async def _tracked_astream(input, config=None, **kw):
@@ -268,7 +267,9 @@ def _make_tracked_llm(kwargs: Dict[str, Any], agent: str = "unknown") -> ChatOpe
 
         注意：astream_events(v2) 驱动下，模型内部即使代码调 ainvoke 也会走
         stream=True 的 HTTP 流，所以必须开启 stream_usage 让服务端返回 usage chunk。
+        流式调用只在开始时占位，流式过程中不写库，结束才 end_llm 补全。
         """
+        span_id = await start_llm(agent)
         full = None
         all_text = ""
         best_usage = None  # 流式过程中任一分片携带的 usage (input, output, cached)
@@ -284,15 +285,12 @@ def _make_tracked_llm(kwargs: Dict[str, Any], agent: str = "unknown") -> ChatOpe
                         best_usage = (inp, out, cached)
                     yield chunk
         except asyncio.TimeoutError:
-            record_llm(agent, kwargs.get("model", "unknown"), 0, 0,
-                       (time.perf_counter() - t0) * 1000, status="error",
-                       error=f"timeout: {LLM_STREAM_TIMEOUT_SEC:g}s")
+            await end_llm(span_id, status="error",
+                          error=f"timeout: {LLM_STREAM_TIMEOUT_SEC:g}s")
             raise
         except Exception as e:
-            record_llm(agent, kwargs.get("model", "unknown"), 0, 0,
-                       (time.perf_counter() - t0) * 1000, status="error", error=str(e))
+            await end_llm(span_id, status="error", error=str(e))
             raise
-        dur = (time.perf_counter() - t0) * 1000
         if full:
             if best_usage:
                 inp, out, cached = best_usage
@@ -303,8 +301,9 @@ def _make_tracked_llm(kwargs: Dict[str, Any], agent: str = "unknown") -> ChatOpe
                 # 流式仍拿不到 usage 时，按字符估算（中英文混合 ~2.5 字/token）
                 out = max(1, int(len(all_text) / 2.5))
             _token_tracker.add(model, inp, out, agent=agent, cached_input_tokens=cached)
-            record_llm(agent, model, inp, out, dur, status="ok",
-                       cached_input_tokens=cached, output=all_text)
+            await end_llm(span_id, status="ok",
+                          input_tokens=inp, output_tokens=out, cached_tokens=cached,
+                          output=all_text)
 
     object.__setattr__(base, "ainvoke", _tracked_ainvoke)
     object.__setattr__(base, "astream", _tracked_astream)
@@ -364,9 +363,10 @@ class _LLM:
         return self._llm.astream(messages, **kw)
 
     def with_structured_output(self, schema, **kw):
-        # DeepSeek 推理模型(v4-pro)不支持 json_schema / 显式 tool_choice 结构化输出，
-        # 统一改用 function_calling（deepseek-chat 实测支持，保证 schema 字段严格匹配）。
-        # 使用方须确保对应 agent 的模型为支持 function_calling 的模型（如 deepseek-chat）。
+        # DeepSeek V4 不支持 json_schema 结构化输出（response_format 仅 text/json_object），
+        # 统一改用 function_calling（v4-pro/flash 非思考模式均支持，schema 严格匹配）。
+        # 使用方须确保对应 agent 走非思考模式（thinking disabled），
+        # 避免思考模式下强制 tool_choice 不稳定 + reasoning_content 回传 400 问题。
         kw.setdefault("method", "function_calling")
         return self._llm.with_structured_output(schema, **kw)
 

@@ -61,10 +61,12 @@ def percentile(values: List[float], p: int) -> float:
     if f == c:
         return round(vs[int(k)], 2)
     return round(vs[f] + (vs[c] - vs[f]) * (k - f), 2)
-
-
 def stats(values: List[float]) -> Dict[str, float]:
-    """一次性输出 count / mean / P50 / P95 / P99 / max。"""
+    """一次性输出 count / mean / P50 / P95 / P99 / max。
+
+    P95 决策：当前规模（每版本几百行明细）下直接用明细样本算精确百分位，
+    不用滑动窗口 / t-digest（那是海量+实时场景才需要的，见 docs/observability-architecture.md）。
+    """
     if not values:
         return {"count": 0, "mean": 0, "p50": 0, "p95": 0, "p99": 0, "max": 0}
     return {
@@ -75,6 +77,18 @@ def stats(values: List[float]) -> Dict[str, float]:
         "p99": percentile(values, 99),
         "max": round(max(values), 2),
     }
+
+
+def _span_dur(row: Dict[str, Any]) -> float:
+    """从 span 行 start_ts/end_ts 推导耗时（毫秒）；缺失返回 0。"""
+    try:
+        s = float(row.get("start_ts") or 0)
+        e = float(row.get("end_ts") or 0)
+        if s and e:
+            return round((e - s) * 1000, 2)
+    except Exception:
+        pass
+    return 0.0
 
 
 def fmt_ms(ms: float) -> str:
@@ -166,60 +180,6 @@ def _merge_per_node(base: Dict[str, Any], other: Dict[str, Any]) -> Dict[str, An
     return base
 
 
-def _get_task_spans(task_id: str) -> List[Dict[str, Any]]:
-    """直连 DB 读取某 task 的完整 span 列表（含 LLM/MCP 指标与结果字段）。"""
-    with get_connection() as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT * FROM obs_spans WHERE task_id = %s", (task_id,))
-        spans = [dict(r) for r in cur.fetchall()]
-
-        cur.execute(
-            "SELECT m.* FROM obs_llm_metrics m JOIN obs_spans s ON m.span_id = s.span_id WHERE s.task_id = %s",
-            (task_id,),
-        )
-        llm = {r["span_id"]: dict(r) for r in cur.fetchall()}
-
-        cur.execute(
-            "SELECT o.* FROM obs_llm_outputs o JOIN obs_spans s ON o.span_id = s.span_id WHERE s.task_id = %s",
-            (task_id,),
-        )
-        llm_out = {r["span_id"]: r["content"] for r in cur.fetchall()}
-
-        cur.execute(
-            "SELECT m.* FROM obs_mcp_metrics m JOIN obs_spans s ON m.span_id = s.span_id WHERE s.task_id = %s",
-            (task_id,),
-        )
-        mcp = {r["span_id"]: dict(r) for r in cur.fetchall()}
-
-        cur.execute(
-            "SELECT o.* FROM obs_mcp_results o JOIN obs_spans s ON o.span_id = s.span_id WHERE s.task_id = %s",
-            (task_id,),
-        )
-        mcp_res = {r["span_id"]: r["result"] for r in cur.fetchall()}
-        cur.close()
-
-    result: List[Dict[str, Any]] = []
-    for s in spans:
-        d = dict(s)
-        st = s["span_type"]
-        if st in ("llm", "correction"):
-            m = llm.get(s["span_id"], {})
-            d["agent"] = m.get("agent")
-            d["model"] = m.get("model")
-            d["input_tokens"] = m.get("input_tokens")
-            d["output_tokens"] = m.get("output_tokens")
-            d["cached_input_tokens"] = m.get("cached_input_tokens")
-            d["output"] = llm_out.get(s["span_id"])
-        elif st == "mcp":
-            m = mcp.get(s["span_id"], {})
-            d["server"] = m.get("server")
-            d["tool"] = m.get("tool")
-            d["retries"] = m.get("retries")
-            d["result"] = mcp_res.get(s["span_id"])
-        result.append(d)
-    return result
-
-
 # ──────────────────────────────────────────────────────────────
 # 数据源 1：PostgreSQL 历史任务
 # ──────────────────────────────────────────────────────────────
@@ -284,23 +244,38 @@ def load_from_db(limit: int = 50, version: Optional[str] = None) -> List[Dict[st
     if not tasks:
         return []
 
+    # 批量取回三个 span 子表：每个表只查一次，WHERE task_id IN (...)，内存按 task_id 分组
+    # 避免 N+1（原实现：每个 task_id 循环查 3 次 = 1 + 50×3 = 151 次查询）
+    task_ids = [t["task_id"] for t in tasks]
+    placeholders = ",".join(["%s"] * len(task_ids))
+    rows_by_task: Dict[str, Dict[str, List[Dict[str, Any]]]] = {
+        tid: {"node": [], "llm": [], "mcp": []} for tid in task_ids
+    }
+    try:
+        with get_connection() as conn:
+            cur = conn.cursor()
+            for table, key in (("obs_node_spans", "node"),
+                               ("obs_llm_spans", "llm"),
+                               ("obs_mcp_spans", "mcp")):
+                cur.execute(
+                    f"SELECT * FROM {table} WHERE task_id IN ({placeholders})",
+                    tuple(task_ids),
+                )
+                for row in cur.fetchall():
+                    rows_by_task.setdefault(row["task_id"], {"node": [], "llm": [], "mcp": []})[key].append(dict(row))
+            cur.close()
+    except Exception as e:
+        print(f"⚠️  观测子表批量读取失败（{e}）")
+        return []
+
     results: List[Dict[str, Any]] = []
     for t in tasks:
         task_id = t["task_id"]
-        try:
-            with get_connection() as conn:
-                cur = conn.cursor()
-                cur.execute("SELECT * FROM obs_node_metrics WHERE task_id = %s", (task_id,))
-                node_rows = [dict(r) for r in cur.fetchall()]
-                cur.execute("SELECT * FROM obs_llm_metrics WHERE task_id = %s", (task_id,))
-                llm_rows = [dict(r) for r in cur.fetchall()]
-                cur.execute("SELECT * FROM obs_mcp_metrics WHERE task_id = %s", (task_id,))
-                mcp_rows = [dict(r) for r in cur.fetchall()]
-                cur.close()
-        except Exception:
-            continue
+        node_rows = rows_by_task.get(task_id, {}).get("node", [])
+        llm_rows = rows_by_task.get(task_id, {}).get("llm", [])
+        mcp_rows = rows_by_task.get(task_id, {}).get("mcp", [])
 
-        # per_node
+        # per_node：从 span 表逐调用聚合
         per_node: Dict[str, Dict[str, Any]] = {}
         llm_by_node: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
         mcp_by_node: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
@@ -313,12 +288,12 @@ def load_from_db(limit: int = 50, version: Optional[str] = None) -> List[Dict[st
             name = nr["node"]
             child_llm = llm_by_node.get(name, [])
             child_mcp = mcp_by_node.get(name, [])
-            llm_calls = sum(int(l.get("calls") or 0) for l in child_llm)
-            llm_input = sum(int(l.get("calls") or 0) * float(l.get("input_tokens_avg") or 0) for l in child_llm)
-            llm_output = sum(int(l.get("calls") or 0) * float(l.get("output_tokens_avg") or 0) for l in child_llm)
-            llm_cached = sum(int(l.get("calls") or 0) * float(l.get("cached_tokens_avg") or 0) for l in child_llm)
-            llm_dur = sum(int(l.get("calls") or 0) * float(l.get("duration_ms_avg") or 0) for l in child_llm)
-            llm_errs = sum(int(l.get("error_count") or 0) for l in child_llm)
+            llm_calls = len(child_llm)
+            llm_input = sum(int(l.get("input_tokens") or 0) for l in child_llm)
+            llm_output = sum(int(l.get("output_tokens") or 0) for l in child_llm)
+            llm_cached = sum(int(l.get("cached_tokens") or 0) for l in child_llm)
+            llm_dur = sum(_span_dur(l) for l in child_llm)
+            llm_errs = sum(1 for l in child_llm if l.get("status") == "error")
 
             tool_agg: Dict[str, Dict[str, Any]] = {}
             for m in child_mcp:
@@ -330,43 +305,45 @@ def load_from_db(limit: int = 50, version: Optional[str] = None) -> List[Dict[st
                         "server": server, "tool": tool,
                         "calls": 0, "errors": 0, "duration_ms": 0.0, "retries": 0,
                     }
-                calls = int(m.get("calls") or 0)
                 item = tool_agg[key]
-                item["calls"] += calls
-                item["duration_ms"] += calls * float(m.get("duration_ms_avg") or 0)
+                item["calls"] += 1
+                item["duration_ms"] += _span_dur(m)
                 item["retries"] += int(m.get("retries") or 0)
-                item["errors"] += int(m.get("error_count") or 0)
+                if m.get("status") == "error":
+                    item["errors"] += 1
             node_tools = list(tool_agg.values())
             for item in node_tools:
                 item["duration_ms"] = round(item["duration_ms"], 2)
             node_tools.sort(key=lambda x: x["calls"], reverse=True)
 
             # 节点内 per-agent LLM 明细（透传，供前端按 agent 下钻）
-            node_agents = []
+            _agent_acc: Dict[str, Dict[str, Any]] = {}
             for l in child_llm:
-                calls = int(l.get("calls") or 0)
-                input_tokens = int(calls * float(l.get("input_tokens_avg") or 0))
-                output_tokens = int(calls * float(l.get("output_tokens_avg") or 0))
-                cached_input_tokens = int(calls * float(l.get("cached_tokens_avg") or 0))
-                node_agents.append({
-                    "agent": l.get("agent") or "unknown",
-                    "model": l.get("model") or "unknown",
-                    "calls": calls,
-                    "input_tokens": input_tokens,
-                    "output_tokens": output_tokens,
-                    "cached_input_tokens": cached_input_tokens,
-                    "cache_hit_rate": round(cached_input_tokens / input_tokens * 100, 1) if input_tokens > 0 else 0.0,
-                    "duration_ms": round(float(l.get("duration_ms_avg") or 0), 2),
-                    "error_count": int(l.get("error_count") or 0),
+                agent = l.get("agent") or "unknown"
+                a = _agent_acc.setdefault(agent, {
+                    "agent": agent, "calls": 0,
+                    "input_tokens": 0, "output_tokens": 0, "cached_input_tokens": 0,
+                    "duration_ms": 0.0, "error_count": 0,
                 })
+                a["calls"] += 1
+                a["input_tokens"] += int(l.get("input_tokens") or 0)
+                a["output_tokens"] += int(l.get("output_tokens") or 0)
+                a["cached_input_tokens"] += int(l.get("cached_tokens") or 0)
+                a["duration_ms"] += _span_dur(l)
+                if l.get("status") == "error":
+                    a["error_count"] += 1
+            node_agents = list(_agent_acc.values())
+            for a in node_agents:
+                a["cache_hit_rate"] = round(a["cached_input_tokens"] / a["input_tokens"] * 100, 1) if a["input_tokens"] > 0 else 0.0
+                a["duration_ms"] = round(a["duration_ms"], 2)
             node_agents.sort(key=lambda x: x["input_tokens"] + x["output_tokens"], reverse=True)
 
             per_node[name] = {
-                "invocations": int(nr.get("invocations") or 1),
-                "duration_ms": float(nr.get("duration_ms_avg") or 0),
+                "invocations": 1,
+                "duration_ms": _span_dur(nr),
                 "status": nr.get("status") or "ok",
                 "llm_calls": llm_calls,
-                "mcp_calls": sum(int(m.get("calls") or 0) for m in child_mcp),
+                "mcp_calls": len(child_mcp),
                 "llm": {
                     "calls": llm_calls,
                     "input_tokens": int(llm_input),
@@ -390,21 +367,21 @@ def load_from_db(limit: int = 50, version: Optional[str] = None) -> List[Dict[st
         llm_errors: List[Dict[str, str]] = []
         for l in llm_rows:
             agent = l.get("agent") or "unknown"
-            model = l.get("model") or "unknown"
-            calls = int(l.get("calls") or 0)
-            inp = int(calls * float(l.get("input_tokens_avg") or 0))
-            out = int(calls * float(l.get("output_tokens_avg") or 0))
-            dur = calls * float(l.get("duration_ms_avg") or 0)
+            inp = int(l.get("input_tokens") or 0)
+            out = int(l.get("output_tokens") or 0)
+            dur = _span_dur(l)
             per_agent[agent]["input_tokens"] += inp
             per_agent[agent]["output_tokens"] += out
-            per_agent[agent]["call_count"] += calls
+            per_agent[agent]["call_count"] += 1
             per_agent[agent]["duration_ms"] += dur
+            # 模型名不存表（monitor 独立服务无法反查配置），per_model 暂以 agent 为键
+            model = agent
             per_model[model]["input_tokens"] += inp
             per_model[model]["output_tokens"] += out
-            per_model[model]["cached_input_tokens"] += int(calls * float(l.get("cached_tokens_avg") or 0))
-            per_model[model]["call_count"] += calls
-            if int(l.get("error_count") or 0) > 0 and l.get("error"):
-                llm_errors.append({"agent": agent, "model": model, "error": l.get("error") or ""})
+            per_model[model]["cached_input_tokens"] += int(l.get("cached_tokens") or 0)
+            per_model[model]["call_count"] += 1
+            if l.get("status") == "error" and l.get("error"):
+                llm_errors.append({"agent": agent, "model": agent, "error": l.get("error") or ""})
 
         # per_tool / tool_errors
         per_tool: Dict[str, Dict[str, float]] = defaultdict(
@@ -415,31 +392,33 @@ def load_from_db(limit: int = 50, version: Optional[str] = None) -> List[Dict[st
             server = m.get("server") or "?"
             tool = m.get("tool") or "?"
             key = f"{server}/{tool}"
-            calls = int(m.get("calls") or 0)
-            per_tool[key]["call_count"] += calls
-            per_tool[key]["duration_ms"] += calls * float(m.get("duration_ms_avg") or 0)
+            per_tool[key]["call_count"] += 1
+            per_tool[key]["duration_ms"] += _span_dur(m)
             per_tool[key]["retries"] += int(m.get("retries") or 0)
-            errs = int(m.get("error_count") or 0)
-            per_tool[key]["error_count"] += errs
-            if errs > 0 and m.get("error"):
+            if m.get("status") == "error":
+                per_tool[key]["error_count"] += 1
                 tool_errors.append({"server": server, "tool": tool, "error": m.get("error") or ""})
 
-        # summary
-        total_input = int(t.get("total_input_tokens") or 0)
-        total_output = int(t.get("total_output_tokens") or 0)
-        total_cached = int(t.get("cached_input_tokens") or 0)
+        # summary：从 span 表动态聚合
+        llm_rows_sum = llm_rows
+        mcp_rows_sum = mcp_rows
+        total_input = sum(int(l.get("input_tokens") or 0) for l in llm_rows_sum)
+        total_output = sum(int(l.get("output_tokens") or 0) for l in llm_rows_sum)
+        total_cached = sum(int(l.get("cached_tokens") or 0) for l in llm_rows_sum)
+        llm_dur_sum = sum(_span_dur(l) for l in llm_rows_sum)
+        tool_dur_sum = sum(_span_dur(m) for m in mcp_rows_sum)
         summary = {
-            "node_count": int(t.get("node_count") or 0),
-            "llm_call_count": int(t.get("llm_call_count") or 0),
-            "tool_call_count": int(t.get("tool_call_count") or 0),
+            "node_count": len(node_rows),
+            "llm_call_count": len(llm_rows_sum),
+            "tool_call_count": len(mcp_rows_sum),
             "total_input_tokens": total_input,
             "total_output_tokens": total_output,
             "total_tokens": total_input + total_output,
             "cached_input_tokens": total_cached,
             "cache_hit_rate": round(total_cached / total_input, 4) if total_input > 0 else None,
-            "llm_duration_ms": float(t.get("llm_duration_ms") or 0),
-            "tool_duration_ms": float(t.get("tool_duration_ms") or 0),
-            "wall_clock_ms": float(t.get("duration_ms") or 0),
+            "llm_duration_ms": round(llm_dur_sum, 2),
+            "tool_duration_ms": round(tool_dur_sum, 2),
+            "wall_clock_ms": round((float(t.get("end_ts") or 0) - float(t.get("start_ts") or 0)) * 1000, 2) if t.get("end_ts") and t.get("start_ts") else 0.0,
         }
 
         results.append({
@@ -451,6 +430,9 @@ def load_from_db(limit: int = 50, version: Optional[str] = None) -> List[Dict[st
             "duration_ms": float(t.get("duration_ms") or 0),
             "status": t.get("status") or "?",
             "error": t.get("error"),
+            "intent": t.get("intent") or "",
+            "query_type": t.get("query_type") or "",
+            "client_duration_ms": t.get("client_duration_ms"),
             "summary": summary,
             "per_node": per_node,
             "per_agent": dict(per_agent),
@@ -646,6 +628,11 @@ def build_report(tasks: List[Dict[str, Any]]) -> Dict[str, Any]:
     ok_count = sum(1 for t in tasks if t["status"] == "ok")
     durations = [t["duration_ms"] for t in tasks if t["duration_ms"] > 0]
     wall = stats(durations)
+
+    # 端到端耗时（客户端测试请求发出 → 收到结果，仅统计有回写的任务）
+    client_durations = [t.get("client_duration_ms") for t in tasks
+                        if t.get("client_duration_ms") and float(t["client_duration_ms"]) > 0]
+    client_stats = stats(client_durations) if client_durations else {}
 
     total_input = sum(t["summary"].get("total_input_tokens", 0) for t in tasks)
     total_output = sum(t["summary"].get("total_output_tokens", 0) for t in tasks)
@@ -870,6 +857,7 @@ def build_report(tasks: List[Dict[str, Any]]) -> Dict[str, Any]:
         "error_count": total - ok_count,
         "success_rate": round(ok_count / total * 100, 1),
         "duration": wall,
+        "client_duration": client_stats,
         "tokens": {
             "input": total_input,
             "output": total_output,

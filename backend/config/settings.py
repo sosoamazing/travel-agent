@@ -27,7 +27,7 @@ LANGCHAIN_TRACING_V2 = os.getenv("LANGCHAIN_TRACING_V2", "false")
 LANGCHAIN_API_KEY = os.getenv("LANGCHAIN_API_KEY", "")
 
 # 模型配置（默认值可在 .env 中覆盖）
-QWEN3_MODEL = os.getenv("LLM_MAIN_MODEL", "deepseek-chat")  # 主模型，已切换为 DeepSeek
+QWEN3_MODEL = os.getenv("LLM_MAIN_MODEL", "deepseek-v4-pro")  # 主模型，已切换为 DeepSeek V4
 QWEN3_TEMPERATURE = float(os.getenv("LLM_MAIN_TEMPERATURE", "0.7"))
 
 # DeepSeek Flash - 轻量快速模型，适合 JSON 修正、价格估算等简单任务
@@ -57,7 +57,12 @@ PLAN_MAX_REPLAN = int(os.getenv("PLAN_MAX_REPLAN", "3"))
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-v3")
 
 # RAG配置
-CHROMA_PERSIST_DIR = PROJECT_ROOT.parent / "aggentic_RAG" / "data" / "travel_vectordb"
+# ChromaDB 持久化目录：.env 可覆盖；默认指向仓库根下的 agentic_RAG/data/travel_vectordb
+# （历史拼写错误 aggentic_RAG 已修正为 agentic_RAG）
+CHROMA_PERSIST_DIR = Path(
+    os.getenv("CHROMA_PERSIST_DIR")
+    or str(PROJECT_ROOT.parent / "agentic_RAG" / "data" / "travel_vectordb")
+)
 RAG_CHUNK_SIZE = 500
 RAG_CHUNK_OVERLAP = 50
 # 检索数量 / 批量载入大小：运行时调优项，.env 可覆盖
@@ -65,7 +70,10 @@ RAG_SEARCH_K = int(os.getenv("RAG_SEARCH_K", "3"))
 RAG_BATCH_SIZE = int(os.getenv("RAG_BATCH_SIZE", "10"))  # ChromaDB批量载入大小，如遇到API限制可调小
 
 # MCP配置
-MCP_CONFIG_PATH = str(PROJECT_ROOT / "config" / "servers_config.json")
+# MCP servers 配置文件路径：.env 可覆盖（如 MCP_CONFIG_PATH=/etc/app/servers_config.json）
+MCP_CONFIG_PATH = os.getenv(
+    "MCP_CONFIG_PATH", str(PROJECT_ROOT / "config" / "servers_config.json")
+)
 
 # MCP 令牌桶限速配置（每个 MCP 工具独立一个桶）
 # 每 MCP_RATE_LIMIT_WINDOW 秒最多 MCP_RATE_LIMIT_MAX 次 API 调用
@@ -161,7 +169,8 @@ AGENT_VERSION = _resolve_agent_version()
 INTENT_TEST_MODE = os.getenv("INTENT_TEST_MODE", "0") == "1"
 
 # ========== 日志配置 ==========
-LOG_DIR = PROJECT_ROOT.parent / "logs"
+# 日志目录：.env 可覆盖（部署到容器/服务器时常用，如 LOG_DIR=/var/log/travel-agent）
+LOG_DIR = Path(os.getenv("LOG_DIR", str(PROJECT_ROOT.parent / "logs")))
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"

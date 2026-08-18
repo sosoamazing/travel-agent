@@ -10,7 +10,6 @@ from typing import Optional
 from langchain_core.messages import SystemMessage, HumanMessage
 
 from agent_nodes._common import _LLM
-from agent_nodes._observability import get_current_llm_id, correction_scope
 from config.settings import JSON_FIX_MAX_ATTEMPTS
 
 logger = logging.getLogger(__name__)
@@ -81,9 +80,6 @@ async def fix_json_with_flash(
     if max_attempts is None:
         max_attempts = JSON_FIX_MAX_ATTEMPTS
 
-    # json_fix 子调用会以 span_type='correction' 挂在父 LLM 下，读时自动聚合成 correction
-    parent_llm_id = get_current_llm_id()
-
     last = bad_output.strip()
     for attempt in range(1, max_attempts + 1):
         # 用 SystemMessage/HumanMessage 直接构造：schema_hint 常含 JSON 花括号字面量，
@@ -97,8 +93,7 @@ async def fix_json_with_flash(
 - 期望的 JSON 结构: {schema_hint}"""),
             HumanMessage(content=f"需要修正的内容：\n{last}"),
         ]
-        with correction_scope(parent_llm_id):
-            resp = await _ds_flash_llm.ainvoke(messages)
+        resp = await _ds_flash_llm.ainvoke(messages)
 
         content = extract_json_block(resp.content)
         last = content  # 本轮失败则下一轮基于本轮输出再修

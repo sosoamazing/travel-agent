@@ -46,7 +46,7 @@ async def _extract_attractions(rag_raw: str, poi_raw: str, city: str,
                                preferences: List[str], user_query: str,
                                few_shot: str = "") -> List[Dict]:
     """综合 RAG + 高德 POI + LLM 训练记忆，提取候选景点（含备份）"""
-    llm = _LLM(agent="attractions", temperature=0.3)
+    llm = _LLM(agent="attractions", temperature=0.3, extra_body={"thinking": {"type": "disabled"}})
     few_shot_lines = f"\n\n{few_shot}" if few_shot else ""
     prompt = f"""请提取该城市的适量候选景点（6-10 个，需含备份景点），每个景点包含：
 - name: 名称
@@ -153,7 +153,7 @@ async def _plan_city_route(city: str, attractions: List[Dict], planner_context: 
                            is_replan: bool, replan_count: int,
                            transport_ctx: Dict = None) -> Dict[str, Any]:
     """让 plan-agent 选择景点、规划路线、校验时间与预算约束"""
-    llm = _LLM(agent="route_plan", temperature=0.3)
+    llm = _LLM(agent="route_plan", temperature=0.3, extra_body={"thinking": {"type": "disabled"}})
     travel_days = planner_context.get("travel_days", 1) or 1
     preferences = planner_context.get("preferences", [])
     cities_count = max(1, planner_context.get("_cities_count", 1))
@@ -682,7 +682,7 @@ async def _select_hotel_with_llm(city: str, hotels: List[Dict], route_plan: Dict
 景点几何中心（到各景点距离和最小的参考点，越近越省通勤）：{center or "（未计算）"}
 """
     try:
-        llm = _LLM(agent="hotel_select", temperature=0.2)
+        llm = _LLM(agent="hotel_select", temperature=0.2, extra_body={"thinking": {"type": "disabled"}})
         structured = llm.with_structured_output(_HotelChoice)
         data: _HotelChoice = await structured.ainvoke([HumanMessage(content=prompt)])
         chosen_name = (data.name or "").strip()
@@ -846,7 +846,7 @@ async def city_budget_allocation_node(state: Dict[str, Any]) -> Dict[str, Any]:
         lock_line = (f"\n注意：以下城市已规划完毕并锁定预算，不在本次分配范围内：{', '.join(keep_done_cities)}"
                      f"（已锁定 {locked_spent:.0f} 元，不计入可分配池）")
 
-    llm = _LLM(agent="budget_alloc", temperature=0.3)
+    llm = _LLM(agent="budget_alloc", temperature=0.3, extra_body={"thinking": {"type": "disabled"}})
     prompt = f"""请将旅游预算智能分配到以下每个城市。
 
 分配要求：
@@ -993,7 +993,7 @@ async def _run_one_city_async(
     """
     try:
         # 节点名不带城市标签：并发多城都写同名 "city_plan"，monitor 侧直接同名计数+累加
-        with node_scope("city_plan"):
+        async with node_scope("city_plan"):
             return await _run_one_city_inner(city, idx, state_snapshot)
     except Exception as e:
         logger.error(f"❌ [{city}] 城内规划失败: {e}", exc_info=True)

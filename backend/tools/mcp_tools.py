@@ -176,8 +176,9 @@ class MCPToolManager:
             max_retries: 最大重试次数（默认2次）
             **kwargs: 工具参数
         """
-        from agent_nodes._observability import record_mcp
+        from agent_nodes._observability import start_mcp, end_mcp
         stats: Dict[str, Any] = {"retries": 0}
+        span_id = await start_mcp(server_name, tool_name)
         t0 = time.perf_counter()
         try:
             if _mcp_loop is not None and asyncio.get_running_loop() is not _mcp_loop:
@@ -194,15 +195,14 @@ class MCPToolManager:
                     timeout=MCP_TIMEOUT_SEC,
                 )
         except asyncio.TimeoutError:
-            record_mcp(server_name, tool_name, (time.perf_counter() - t0) * 1000,
-                       status="error", retries=stats.get("retries", 0), error="timeout")
+            await end_mcp(span_id, status="error", error="timeout",
+                          retries=stats.get("retries", 0))
             raise
         except Exception as e:
-            record_mcp(server_name, tool_name, (time.perf_counter() - t0) * 1000,
-                       status="error", retries=stats.get("retries", 0), error=str(e))
+            await end_mcp(span_id, status="error", error=str(e),
+                          retries=stats.get("retries", 0))
             raise
-        record_mcp(server_name, tool_name, (time.perf_counter() - t0) * 1000,
-                   status="ok", retries=stats.get("retries", 0), result=result)
+        await end_mcp(span_id, status="ok", retries=stats.get("retries", 0))
         return result
 
     async def _call_tool_on_mcp_loop(self, server_name: str, tool_name: str, max_retries: int = 2,

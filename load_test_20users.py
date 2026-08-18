@@ -120,6 +120,7 @@ async def run_one_user(
                 return {
                     "user": username,
                     "status": "ok",
+                    "task_id": task_id,
                     "qtype": result.get("query_type"),
                     "answer": ans,
                     "cost": time.perf_counter() - t_start,
@@ -128,6 +129,7 @@ async def run_one_user(
                 return {
                     "user": username,
                     "status": "failed",
+                    "task_id": task_id,
                     "error": snap.get("error"),
                     "cost": time.perf_counter() - t_start,
                 }
@@ -160,6 +162,34 @@ def load_questions_from_db(n: int = 30) -> List[Dict[str, str]]:
     return [{"question": r[0], "intent": r[1]} for r in rows]
 
 
+def _write_client_durations(results):
+    """把每个任务的端到端耗时（cost，秒）回写 obs_tasks.client_duration_ms（毫秒）。"""
+    import psycopg2
+    from dotenv import load_dotenv
+    from pathlib import Path
+
+    load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env", override=True)
+    conn = psycopg2.connect(
+        host=os.getenv("PG_HOST", "localhost"),
+        port=int(os.getenv("PG_PORT", "5432")),
+        user=os.getenv("PG_USER", "travel_agent"),
+        password=os.getenv("PG_PASSWORD", "travel_agent"),
+        dbname=os.getenv("PG_DATABASE", "travel_agent"),
+    )
+    conn.autocommit = True
+    cur = conn.cursor()
+    n = 0
+    for r in results:
+        tid = r.get("task_id")
+        cost = r.get("cost")
+        if tid and cost is not None and cost > 0:
+            cur.execute("UPDATE obs_tasks SET client_duration_ms=%s WHERE task_id=%s", (round(cost * 1000, 2), tid))
+            n += cur.rowcount
+    cur.close()
+    conn.close()
+    print(f"📊 已回写 {n} 条端到端耗时")
+
+
 async def main() -> None:
     # ── 问题来源：--from-db N 从数据库随机取，否则用内置列表 ──
     questions = [{"question": q, "intent": ""} for q in QUESTIONS]
@@ -186,6 +216,12 @@ async def main() -> None:
               for i, q in enumerate(questions)]
         )
         total_cost = time.perf_counter() - t0
+
+    # 回写端到端耗时到 obs_tasks（用于 monitor 展示）
+    try:
+        _write_client_durations(results)
+    except Exception as e:
+        print(f"⚠️ 回写端到端耗时失败: {e}")
 
     # ── 汇总 ──
     ok = [r for r in results if r["status"] == "ok"]

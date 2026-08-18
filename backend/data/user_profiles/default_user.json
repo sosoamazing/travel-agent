@@ -16,9 +16,21 @@
   ],
   "preferred_transport": [],
   "dietary_restrictions": [],
-  "cuisine_preference": [],
+  "cuisine_preference": [
+    "海鲜"
+  ],
   "liked_activities": [
-    "古城"
+    "古城",
+    "度假",
+    "徒步",
+    "亲子",
+    "自然",
+    "文化",
+    "美食",
+    "海滨",
+    "自驾",
+    "古镇",
+    "海岛"
   ],
   "disliked_activities": [
     "动物园",
@@ -27,6 +39,6 @@
   "travel_season_preference": [],
   "daily_schedule_preference": "随性",
   "created_at": "2026-03-21T19:20:59.463580",
-  "updated_at": "2026-08-15T20:24:17.712561",
+  "updated_at": "2026-08-16T20:56:59.708170",
   "query_count": 5
 }

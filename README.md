@@ -1,6 +1,6 @@
 # 🌍 智能旅行规划助手
 
-基于 **LangChain + LangGraph + Streamlit + MCP + RAG** 的智能旅行规划系统，采用 Multi-Agents 架构，结合双模型协作（DeepSeek R1 + Qwen3）、知识检索和实时数据查询，为用户提供智能化的旅行方案。
+基于 **LangChain + LangGraph + React + FastAPI + MCP + RAG** 的智能旅行规划系统。采用**固定 DAG 的 Multi-Agent 工作流**、**双模型协作**（DeepSeek V4 Pro + Flash）、**知识检索**和**实时数据查询**（12306 / 高德 / 八字 MCP），为用户生成完整的旅行方案，并通过微服务化拆分为 gateway / backend / monitor 三个进程。
 
 ## 📋 目录
 
@@ -10,125 +10,113 @@
 - [系统要求](#系统要求)
 - [安装部署](#安装部署)
 - [使用指南](#使用指南)
-- [数据库管理](#数据库管理)
-- [项目结构](#项目结构)
+- [安全说明](#安全说明)
 - [API 接口](#api-接口)
+- [数据库与观测](#数据库与观测)
+- [项目结构](#项目结构)
+- [开发说明](#开发说明)
 - [故障排查](#故障排查)
+- [贡献指南](#贡献指南)
 
 ---
 
 ## 🎯 项目简介
 
-这是一个智能旅行规划系统，采用 **Streamlit UI + LangGraph Multi-Agents** 架构，通过自然语言对话为用户生成完整的旅行方案。系统由多个专门的 Agent 协同工作，包括 Planner（规划师）、Executor（执行者）、Summarizer（总结者）和 Feedback Agent（反馈代理），实现高效的任务分解和执行。
+这是一个智能旅行规划系统，采用 **React 前端 + LangGraph Multi-Agent 工作流 + 微服务架构**。用户用自然语言提出旅行需求，系统自动完成意图分类、参数提取、跨城交通规划、多城市并发城内规划（景点 / 行程 / 酒店）、预算校验与自动重规划，最终生成完整的旅行方案。
 
 ### 主要特性
 
-- **Multi-Agents 架构**：
-  - 🧠 **Planner Agent**：解析用户需求，提取关键信息
-  - 🔧 **Executor Agent**：调用工具执行具体任务
-  - 📝 **Summarizer Agent**：综合信息生成最终方案
-  - 💬 **Feedback Agent**：处理对话反馈和多轮交互
+- **固定 DAG 工作流**（非动态 ReAct，链路可预测、可观测）：
+  - 意图分类 → 对话 / 反馈 / 信息查询 / 旅行规划 四分支
+  - 旅行规划 → 参数提取 → 澄清 / 简单查询 / 市内 / 跨城交通预检
+  - 跨城交通 → LLM 按城市分配预算 → 全城市并发城内规划 → 总结
 
-- **双模型协作**：
-  - **DeepSeek R1**：处理复杂推理和多目的地路线优化（预算分配、时间安排）
-  - **Qwen3**：负责信息提取、工具调用决策和方案生成
+- **双模型协作**（按 agent 可单独覆盖）：
+  - **DeepSeek V4 Pro**：复杂推理任务（意图分类、参数提取、路线规划、预算分配、酒店选择、交通方式决策等）
+  - **DeepSeek V4 Flash**：轻量任务（方案总结、JSON 修正、酒店价格估价）
 
-- **实时数据集成** (基于 MCP 协议)：
-  - 🚄 12306 火车票查询（自动获取站点代码，查询车次时刻表）
-  - 🚗 高德地图自驾路线（自动计算距离、时间、过路费）
-  - 🏨 高德地图酒店搜索（根据预算自动筛选）
-  - ☀️ 高德地图天气预报（支持多日预报）
-  - 📅 八字黄历查询（农历、宜忌、吉日）
-  - ✈️ 航班查询（可选，长途>800km 自动触发）
+- **实时数据集成**（基于 MCP 协议，令牌桶限速）：
+  - 🚄 12306 火车票查询
+  - 🚗 高德地图自驾路线 / 距离 / 费用
+  - 🏨 高德地图酒店搜索
+  - ☀️ 高德地图天气预报
+  - 📅 八字黄历查询
+  - ✈️ 航班查询（可选，长途自动触发）
 
-- **知识库检索**：
-  - RAG 向量数据库存储旅游攻略
-  - 支持 TXT、MD、PDF、CSV 格式导入
+- **知识库检索**（RAG）：
+  - 向量数据库存储旅游攻略，支持 TXT / MD / PDF / CSV 导入
 
----
+- **三层记忆系统**：
+  - **工作记忆**：多轮规划快照，keep / replan 判定，实现"调整需求后重规划"
+  - **情景记忆**：历史行程落库，作为 few-shot 参考，跨会话个性化
+  - **语义记忆**：从行程蒸馏用户偏好，回写用户档案
 
-## 🚀 核心功能
+- **预算智能管控**：
+  - 交通累加校验、按城市 × 天数 × 偏好 × 淡旺季智能分配预算
+  - 超预算自动重规划（默认最多 3 次），仍超支则把完整方案交给用户决策
 
-### 1. 智能信息提取
-- 从自然语言对话中提取出发地、目的地、日期、预算等关键信息
-- 支持相对日期（"明天"、"下周"）自动转换
-- 多轮对话上下文保持，支持增量信息更新
-
-### 2. 交通方案对比
-- 自动查询火车票信息（车次、时间、票价）
-- 计算自驾路线（距离、时间、过路费）
-- 综合对比推荐最优方案
-
-### 3. 住宿推荐
-- 根据预算自动选择酒店等级关键词
-  - 预算 > 500元：五星/豪华
-  - 预算 300-500元：品牌连锁
-  - 预算 < 300元：经济型/快捷
-- 提供酒店名称、价格、地址信息
-
-### 4. 天气与黄历
-- 查询旅行日期的天气预报（最多4天）
-- 查询农历黄历，分析是否适合出行
-- 展示宜忌事项
-
-### 5. 行程规划
-- 结合 RAG 知识库和实时 POI 数据
-- 生成每日详细行程
-- 计算预算分配（交通、住宿、餐饮、门票）
-
-### 6. 用户画像管理
-- 保存用户偏好和历史数据
-- 支持个性化推荐
-- 聊天历史持久化存储
+- **工程化能力**：
+  - SSE 流式输出（节点进度 + LLM token）
+  - Postgres LangGraph checkpointer（断点续跑）
+  - 任务并发信号量、LLM/MCP 硬超时、MCP 令牌桶限速
+  - 观测落库（`obs_*` 表）+ 独立 monitor 服务 + token 用量统计
 
 ---
 
 ## 🏗️ 技术架构
 
-### Multi-Agents 工作流
+### 工作流（固定 DAG）
 
 ```
 用户输入
    ↓
-[Planner Agent] → 信息提取 + 需求分析
-   ↓
-[Executor Agent] → 工具调用（RAG/12306/高德/黄历）
-   ↓
-[Summarizer Agent] → 方案合成
-   ↓
-[Feedback Agent] → 多轮交互优化
-   ↓
-最终输出
+classify（意图 4 分类）
+   ├─ conversation ──→ 对话回复
+   ├─ feedback ──────→ 反馈处理（回写情景记忆满意度）
+   ├─ information ───→ 信息查询
+   └─ travel ────────→ extract_params（参数提取）
+                          ├─ 需澄清 → ask_clarification
+                          ├─ 简单查询 → simple_rag_search → summarizer
+                          ├─ 市内旅游 → city_budget_allocation
+                          └─ 跨城旅游 → transport_check（交通预检）
+                                           ├─ 超预算 → budget_fail
+                                           └─ transport_select → city_budget_allocation
+                                                               → plan_all_cities_concurrent（多城市并发城内规划）
+                                                                   ├─ 超预算 → budget_fail
+                                                                   └─ summarizer → 总结 + 记忆落库
 ```
 
-### 微服务架构
+### 微服务拓扑
 
 ```
-React 前端 (JWT) ──► gateway :8000 ──► backend :8001
-                        │ 对外鉴权         │ /internal/* 业务 + LangGraph
-                        │                  └─ 写入 obs_* 表
-                        └── monitor :8002（直连 PostgreSQL 只读 obs_*，供管理员监控）
+React 前端 (JWT, localStorage) ──► gateway :8000 ──► backend :8001
+                                     │ 对外鉴权          │ /internal/* 业务 + LangGraph
+                                     │  SSE 透传          └─ 写入 obs_* 观测表
+                                     └── monitor :8002（直连 PostgreSQL 只读 obs_*，管理员观测）
 ```
 
 - **gateway**（`:8000`）：对外唯一入口，JWT 本地鉴权后转发到 backend；SSE 透传。
 - **backend**（`:8001`）：业务核心，暴露 `/internal/*`，按 `user_id` 做资源归属校验。
-- **monitor**（`:8002`）：管理员监控服务，不依赖 backend 代码，直连 PostgreSQL 只读聚合观测数据。
+- **monitor**（`:8002`）：管理员监控服务，直连 PostgreSQL 只读聚合观测数据。
 
 ### 核心技术栈
 
 **后端**：
-- **LangGraph**: Multi-Agents 工作流编排
-- **LangChain**: Agent 框架和工具集成
+- **LangGraph**: Multi-Agent 固定 DAG 工作流编排
+- **LangChain**: Agent 框架与工具集成
 - **FastAPI + uvicorn**: 微服务（gateway / backend / monitor 三进程）
+- **PostgreSQL (pgvector)** + SQLAlchemy/asyncpg：业务与观测数据
 - **ChromaDB**: 向量数据库（存储旅游攻略）
-- **DashScope**: 阿里云模型服务（Qwen3-plus + text-embedding-v3）
-- **DeepSeek API**: 深度推理模型（deepseek-reasoner）
-- **MCP (Model Context Protocol)**: 外部工具集成
-  - 12306 Server（火车票）
-  - Gaode Server（地图、天气、酒店）
-  - Bazi Server（黄历）
-  - Flight Server（航班，可选）
-  - Bing Search Server（搜索，可选）
+- **DashScope**: 阿里云模型服务（Embedding）
+- **DeepSeek API**: 主模型（deepseek-v4-pro / deepseek-v4-flash）
+- **MCP (Model Context Protocol)**: 12306 / Gaode / Bazi / Flight / Bing 外部工具
+- **LangGraph Postgres checkpoint**: 断点续跑
+- **aiolimiter**: MCP 工具令牌桶限速
+
+**前端**：
+- **React 18 + Vite 5**
+- react-markdown + remark-gfm（Markdown 渲染）
+- fetch 流式读取 SSE（支持携带 Authorization 头）
 
 ---
 
@@ -136,136 +124,69 @@ React 前端 (JWT) ──► gateway :8000 ──► backend :8001
 
 ### 运行环境
 - Python >= 3.11
+- Node.js >= 18
+- PostgreSQL >= 17（建议使用 pgvector 镜像）
 - 8GB+ RAM（用于向量数据库和模型推理）
-- Windows/Linux/macOS
+- Windows / Linux / macOS
 
-### API 密钥
-- **DeepSeek API Key**（用于 DeepSeek R1 模型）
-- **DashScope API Key**（用于 Qwen3 和文本嵌入）
-- **MCP 服务器 URL**（12306、高德地图、八字服务器等）
-
----
-
-## 🔑 API 密钥获取
-
-### 1. DeepSeek API Key
-
-**用途**：DeepSeek R1 模型用于复杂推理和优化任务
-
-**获取步骤**：
-
-1. 访问 [DeepSeek 开放平台](https://platform.deepseek.com/)
-2. 注册账号并登录
-3. 进入「API Keys」页面
-4. 点击「创建新密钥」
-5. 复制生成的 API Key（格式：`sk-xxxxxxxxxxxxxxxx`）
-
-**费用**：按 Token 使用量计费，新用户通常有免费额度
-
-### 2. DashScope API Key（阿里云）
-
-**用途**：Qwen3 模型和文本嵌入（text-embedding-v3）
-
-**获取步骤**：
-1. 访问 [阿里云 DashScope](https://dashscope.aliyun.com/)
-2. 使用阿里云账号登录（需要实名认证）
-3. 进入「API-KEY 管理」
-4. 创建新的 API Key
-5. 复制生成的 API Key（格式：`sk-xxxxxxxxxxxxxxxx`）
-
-**费用**：
-
-- Qwen3 模型：按 Token 计费，有免费额度
-- 文本嵌入：按调用次数计费，新用户有免费额度
-
-### 3. MCP 服务器配置
-
-**MCP（Model Context Protocol）** 是连接外部工具的协议。本项目使用以下 MCP 服务器：
-
-#### 可用的 MCP 服务器：
-
-1. **12306 Server** - 火车票查询
-   - 提供商：ModelScope
-   - 功能：查询火车车次、票价、时刻表
-
-2. **Gaode Map Server** - 高德地图
-   - 提供商：ModelScope
-   - 功能：路线规划、酒店查询、天气预报、POI 搜索
-
-3. **Bazi Server** - 八字黄历服务器
-   - 提供商：ModelScope
-   - 功能：查询农历、黄历宜忌、出行吉日
-
-4. **Bing Search Server** - 必应搜索（可选）
-   - 提供商：ModelScope
-   - 功能：搜索最新旅游资讯
-
-5. **Flight Server** - 航班查询（可选）
-   - 提供商：ModelScope
-   - 功能：查询航班信息
-
-#### 如何获取 MCP 服务器 URL：
-
-**方式1：使用 ModelScope 提供的公开服务**
-
-1. 访问 [ModelScope MCP 广场](https://www.modelscope.cn/)
-2. 搜索对应的 MCP 服务（如「12306 MCP」、「高德地图 MCP」）
-3. 获取服务的 SSE 接口地址
-
-**方式2：自己部署 MCP 服务器**
-1. 从 GitHub 获取 MCP 服务器源码
-2. 按照服务器文档部署到自己的服务器
-3. 使用自己的服务器地址
-
-**注意**：
-- MCP 服务器 URL 通常以 `/sse` 结尾（Server-Sent Events）
-- 某些 MCP 服务可能需要额外的 API Key（如高德地图需要高德开放平台 Key）
-- 建议使用稳定的服务提供商，避免服务中断
+### API 密钥（必须配置）
+- **DeepSeek API Key**（`OPENAI_API_KEY`，主模型）
+- **DashScope API Key**（`DASHSCOPE_API_KEY`，Embedding）
+- **MCP 服务器 URL**（12306 / 高德 / 八字，见 `config/servers_config.json`）
 
 ---
 
 ## 📦 安装部署
 
-### 1. 克隆项目
+### 1. 启动数据库（PostgreSQL + pgvector）
 
 ```bash
-git clone <repository-url>
-cd travel-agent
+# 项目根目录（travel-agent/）下
+docker compose up -d
 ```
 
-### 2. 安装依赖
-
-进入 backend 目录并安装依赖：
+### 2. 安装后端依赖
 
 ```bash
 cd backend
 pip install -r requirements.txt
 ```
 
-### 3. 配置环境变量
-
-在 `backend` 目录下创建或编辑 `.env` 文件：
+### 3. 安装前端依赖
 
 ```bash
-# 模型 API 密钥（必填）
-DEEPSEEK_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-DASHSCOPE_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-
-# LangChain 追踪（可选，用于调试）
-LANGCHAIN_TRACING_V2=false
-
-# MCP 配置文件路径（默认值）
-MCP_CONFIG_PATH=config/servers_config.json
-
-# ChromaDB 向量数据库路径（默认值）
-CHROMA_PERSIST_DIR=../data/travel_vectordb
+cd frontend
+npm install
 ```
 
-**重要**：将 `sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx` 替换为你获取的真实 API Key。
+### 4. 配置环境变量
 
-### 4. 配置 MCP 服务器
+在项目根目录（`travel-agent/travel-agent/`）创建或编辑 `.env` 文件：
 
-编辑 `config/servers_config.json`：
+```bash
+# 模型 API 密钥（必填，填入真实 Key）
+OPENAI_API_KEY=sk-your-deepseek-key
+DASHSCOPE_API_KEY=sk-your-dashscope-key
+OPENAI_BASE_URL=https://api.deepseek.com/v1
+
+# PostgreSQL（默认值见下，与 docker-compose 一致）
+PG_HOST=localhost
+PG_PORT=5432
+PG_USER=travel_agent
+PG_PASSWORD=travel_agent
+PG_DATABASE=travel_agent
+
+# 安全（务必修改，否则有风险，见「安全说明」）
+JWT_SECRET=your-strong-random-secret
+SUPERADMIN_USERNAME=admin
+SUPERADMIN_PASSWORD=your-strong-admin-password
+```
+
+> ⚠️ `.env` 已被 `.gitignore` 忽略，**不要提交真实密钥到版本库**。
+
+### 5. 配置 MCP 服务器
+
+编辑 `backend/config/servers_config.json`，填入真实 MCP 服务器地址：
 
 ```json
 {
@@ -296,20 +217,9 @@ CHROMA_PERSIST_DIR=../data/travel_vectordb
 }
 ```
 
-**配置说明**：
-- `mcp_servers`：MCP 服务器列表
-  - `name`：服务器名称（用于日志）
-  - `url`：服务器 SSE 接口地址
-  - `required`：是否必需
+### 6. 启动应用（三进程）
 
-**必需的 MCP 服务器**：
-- ✅ **12306 Server**：火车票查询
-- ✅ **Gaode Server**：地图、酒店、天气
-- ✅ **Bazi Server**：黄历查询
-
-### 5. 启动应用（微服务三进程）
-
-本项目已拆分为三个独立服务，启动顺序如下（均在 `travel-agent/travel-agent` 目录下，共用 backend 的 Python 环境）：
+在项目根目录（`travel-agent/travel-agent/`）下，按顺序启动：
 
 ```bash
 # 1) backend 内部服务（业务逻辑 + LangGraph 工作流 + 观测写入），端口 8001
@@ -322,243 +232,187 @@ uvicorn gateway.main:app --host 0.0.0.0 --port 8000
 uvicorn monitor.main:app --host 0.0.0.0 --port 8002
 ```
 
-> Windows 一键启动脚本：`start_services.ps1`（在项目根目录执行）。
+> Windows 一键启动脚本：`start_services.ps1`（项目根目录执行）。
 
-**验证安装**：
-- `GET http://127.0.0.1:8000/health` 返回 gateway 健康状态
-- `GET http://127.0.0.1:8001/internal/health` 返回 backend 健康状态
-- `GET http://127.0.0.1:8002/health` 返回 monitor 健康状态
-- React 前端（`frontend/`）通过 gateway 的 JWT 接口登录/对话
+### 7. 启动前端
+
+```bash
+cd frontend
+npm run dev   # 默认 http://localhost:5173，通过 VITE_API_BASE_URL 指向 gateway
+```
+
+### 验证安装
+
+- `GET http://127.0.0.1:8000/health` → gateway 健康状态
+- `GET http://127.0.0.1:8001/internal/health` → backend 健康状态
+- `GET http://127.0.0.1:8002/health` → monitor 健康状态
+- 前端通过 gateway 的 JWT 接口注册 / 登录 / 对话
 
 ---
 
-## 📖 使用指南
+## 🧭 使用指南
 
 ### 简单查询模式
-
-**适用场景**：快速了解某个城市的景点信息
-
-**示例**：
 ```
 用户：苏州有什么好玩的？
 用户：推荐一下成都的景点
 ```
-
-**系统行为**：
-- 调用 RAG 知识库和高德地图 POI 搜索
-- 返回景点列表和简要介绍
+调用 RAG 知识库 + 高德 POI 搜索，返回景点列表和简介。
 
 ### 完整规划模式
-
-**适用场景**：需要完整的旅行方案
-
-**需要提供的信息**：
-- ✅ 出发地：如"上海"
-- ✅ 目的地：如"苏州"
-- ✅ 旅行天数：如"2天"
-- ✅ 预算：如"1000元"
-- ✅ 出发日期：如"12月10日" 或 "明天"
-
-**示例**：
 ```
 用户：我想从上海去苏州玩2天，预算1000元，12月10日出发，帮我规划一下
 ```
-
-**系统行为**：
-1. Planner Agent 提取关键信息
-2. Executor Agent 调用工具（RAG/12306/高德/黄历）
-3. Summarizer Agent 合成完整方案
-4. Feedback Agent 支持多轮对话优化
-
-**输出内容**：
+系统流程：意图分类 → 参数提取 → 交通预检 → 预算分配 → 城内规划 → 总结，输出：
 - 📋 基本信息（路线、日期、天气、黄历）
 - 🚗🚆 交通方案对比（自驾 vs 火车）
-- 🏨 住宿推荐（2-3家酒店）
+- 🏨 住宿推荐（1-2 家精选 + 备选）
 - 📅 每日行程安排
 - 💰 预算分配明细
-- 💡 特别建议（老人/儿童友好提示）
+- 💡 特别建议（老人 / 儿童友好提示）
 
-### 🧠 DeepSeek R1 复杂推理触发条件
-
-**DeepSeek R1** 仅在**复杂场景**下才会被调用，以控制成本和提高效率。
-
-满足以下 **任意一个条件** 就会使用 R1：
-
-1. **复杂的多城市路线**
-   - 示例："上海 → 苏州 → 杭州 → 南京，5天"
-   - 需要：路线优化、时间分配
-
-2. **紧张的预算优化**
-   - 示例："4人去苏州3天，总预算1500元"（人均375元/天）
-   - 需要：交通、住宿、餐饮、门票的精细优化
-
-3. **多重冲突的约束条件**
-   - 示例："带着两个70岁老人和一个5岁孩子，时间只有1天，要去3个景点"
-   - 需要：平衡老人体力、孩子兴趣、时间限制
-
-4. **复杂的优化问题**
-   - 示例："最省钱的方案"、"最快到达的路线"、"最多景点的行程"
-   - 需要：多目标优化、权衡分析
+### 多城市 & 预算重规划
+- 支持"上海 → 苏州 → 杭州，5天"多城市行程，各城市预算独立分配、并发规划。
+- 超预算自动重规划（最多 3 次），仍超支则把完整方案交给用户决定如何调整。
 
 ---
 
-## ️ 数据库管理
+## 🔒 安全说明
 
-本项目使用 **ChromaDB** 作为向量数据库，存储旅游攻略文档。
+> ⚠️ 本项目用于本地 / 演示用途，部署到公网前务必处理以下安全项：
 
-### 数据库位置
+1. **密钥**：`OPENAI_API_KEY` / `DASHSCOPE_API_KEY` 只放 `.env`（已 gitignore），**绝不提交到版本库**。
+2. **JWT_SECRET**：默认值 `travel-agent-dev-secret-change-me` 仅用于开发，生产必须用强随机串。
+3. **超级管理员**：默认 `admin / admin123456` 会自动创建，生产必须立即修改。
+4. **CORS**：gateway 默认 `allow_origins=["*"]`，生产应限定为前端域名。
+5. **backend 信任边界**：`/internal/*` 接口不做 JWT 鉴权（由 gateway 负责），依赖调用方传入 `user_id` 做归属校验。**backend 必须部署在内网、不对公网暴露**。
+6. **前端 token 存储**：JWT 存于 localStorage，存在 XSS 泄露风险；高安全场景建议改为 HttpOnly Cookie。
 
-```
-data/travel_vectordb/
-```
+---
 
-### 导入数据
+## 📡 API 接口
 
-通过 Streamlit UI 上传文档：
+### gateway（对外，需 JWT）
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/auth/register` | 注册 |
+| POST | `/auth/login` | 登录 |
+| GET | `/auth/me` | 当前用户信息 |
+| POST | `/auth/admin/login` | 管理员登录 |
+| GET/POST/DELETE | `/auth/admin/users` | 管理员管理（superadmin） |
+| POST | `/chat` | 提交对话，返回 task_id |
+| GET | `/tasks/{task_id}` | 轮询任务状态 |
+| POST | `/tasks/{task_id}/resume` | 断点续跑 |
+| GET | `/tasks/{task_id}/stream` | SSE 流式输出 |
+| GET | `/obs/{task_id}` | 观测追踪详情 |
+| GET/POST/DELETE | `/sessions...` | 会话 / 聊天历史 |
+| GET | `/admin/report` `/admin/tasks` | 管理员观测报表 |
 
-1. 启动应用：`streamlit run app.py`
-2. 在左侧边栏找到 **"📚 旅游攻略文档"** 区域
-3. 点击上传按钮，选择文档
-4. 系统自动完成文本分块和向量化
+### backend（内部，/internal/*）
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/internal/auth/*` | 注册 / 登录 / 管理员管理 |
+| POST | `/internal/chat` | 提交对话 |
+| GET | `/internal/tasks/{task_id}` | 任务状态 |
+| POST | `/internal/tasks/{task_id}/resume` | 断点续跑 |
+| GET | `/internal/tasks/{task_id}/stream` | SSE 流 |
+| GET | `/internal/obs/{task_id}` | 观测追踪 |
+| GET/POST/DELETE | `/internal/sessions...` | 会话 / 消息 |
+| GET | `/internal/health` | 健康检查 |
 
-**支持的格式**：
-- `.txt` - 纯文本
-- `.md` - Markdown
-- `.pdf` - PDF 文档
-- `.csv` - CSV 表格
+---
+
+## 🗄️ 数据库与观测
+
+- **业务表**：`users` / `chat_sessions` / `chat_messages` / `trip_episodes`（情景记忆）等
+- **观测表**：`obs_*`（任务 / 节点 / LLM / MCP / token 统计），由 backend 写入，monitor 只读
+- **向量库**：ChromaDB（RAG 旅游攻略），路径由 `CHROMA_PERSIST_DIR` 配置
 
 ---
 
 ## 📁 项目结构
 
 ```
-travel-agent/
+travel-agent/travel-agent/
 ├── backend/                    # 业务核心 + 内部服务（:8001）
-│   ├── agent_nodes/            # LangGraph 各节点实现（classify / transport / city_planning / summarizer / info_query / params）
+│   ├── agent_nodes/            # LangGraph 各节点（classify / params / transport / city_planning / summarizer / info_query）
 │   │   ├── _observability.py   # 运行时观测追踪（写 obs_* 表）
-│   │   └── _obs_storage.py     # 观测 PostgreSQL 存储
-│   ├── config/                 # 配置（settings / prompts / servers_config.json）
+│   │   └── _common.py          # LLM 工厂 / token 统计 / 统一工具调用
+│   ├── config/                 # settings / prompts / servers_config.json
 │   ├── core/                   # TravelService / TaskManager / checkpoint
 │   ├── graph/                  # LangGraph 工作流与状态
-│   ├── memory/                 # 记忆系统（episodic / semantic / working）
-│   ├── tools/                  # 工具集（registry / rag_tool / mcp_tools / typecode_db）
+│   ├── memory/                 # 三层记忆（working / episodic / semantic）
+│   ├── tools/                  # 工具注册表 / MCP / RAG / typecode
 │   ├── tests/                  # 基础设施测试
 │   ├── server.py               # backend 内部 FastAPI 服务（/internal/*）
-│   ├── auth.py                 # JWT / bcrypt 用户认证
+│   ├── auth.py                 # JWT / bcrypt 认证
 │   ├── db.py                   # PostgreSQL 连接池
 │   └── requirements.txt        # Python 依赖
-├── gateway/                    # 对外 API 网关（:8000，JWT 鉴权 + 转发 backend）
-│   ├── main.py
-│   └── schemas.py
+├── gateway/                    # 对外 API 网关（:8000，JWT 鉴权 + 转发）
 ├── monitor/                    # 独立监控服务（:8002，直连 obs_* 只读）
-│   ├── main.py                 # REST 查询接口
-│   ├── analyze.py              # 观测聚合报表 / CLI
-│   └── db.py                   # 只读 DB 连接
-├── frontend/                   # React 前端（Vite + JWT）
+├── frontend/                   # React 前端（Vite + JWT + SSE）
 │   └── src/
-├── .env                        # 环境变量（JWT / PG / 模型密钥）
+├── docs/                       # 设计文档
+├── .env                        # 环境变量（JWT / PG / 模型密钥，已 gitignore）
+├── docker-compose.yml          # PostgreSQL (pgvector) 服务
 └── start_services.ps1          # Windows 一键启动脚本
 ```
 
-**核心文件说明**:
-- `backend/server.py`: backend 内部服务（供 gateway 转发）
-- `gateway/main.py`: 对外网关（JWT 本地鉴权）
-- `monitor/main.py`: 管理员监控服务（只读观测报表）
-- `backend/graph/workflow.py`: LangGraph 工作流定义
-- `backend/agent_nodes/`: 各专门 Agent 节点实现
-- `backend/tools/`: MCP / RAG / 高德等工具实现
-- `backend/config/settings.py`: 全局配置
+---
+
+## 🛠️ 开发说明
+
+### 修改 Prompt
+编辑 `backend/config/prompts.py`。
+
+### 调整模型参数 / 配置
+编辑 `backend/config/settings.py`，或通过 `.env` 覆盖（`LLM_MODEL_<AGENT>` 可单独指定 agent 用 Pro 还是 Flash）。
+
+### 添加新工具
+1. 在 `backend/tools/registry/` 注册工具定义
+2. 在 `backend/config/servers_config.json` 配置对应 MCP 服务器
+3. 通过 `_common._call_mcp_tool` 统一调用
+
+### 添加新 Agent 节点
+1. 在 `backend/agent_nodes/` 创建节点文件
+2. 在 `backend/graph/workflow.py` 注册节点与边
+3. 在 `backend/graph/state.py` 添加必要的状态字段
 
 ---
 
 ## 🐛 故障排查
 
 ### 1. 模块导入错误
-
-**问题**：`ModuleNotFoundError: No module named 'xxx'`
-
-**解决**：
 ```bash
 cd backend
 pip install -r requirements.txt
 ```
 
 ### 2. MCP 工具调用失败
+1. 检查 `config/servers_config.json` 的 MCP URL 是否真实可用
+2. 查看 backend 日志中的 MCP 连接/调用信息
+3. 检查 MCP 令牌桶限速是否触发（`MCP_RATE_LIMIT_MAX`）
 
-**问题**：火车票、天气查询返回错误
-
-**解决**：
-1. 检查 MCP 服务器 URL 是否正确
-2. 验证 `config/servers_config.json` 配置
-3. 查看 Streamlit 后台日志
-
-### 3. Streamlit 启动失败
-
-**问题**：Streamlit 无法启动或报错
-
-**解决**：
-1. 确认已安装 Streamlit: `pip install streamlit`
-2. 检查端口 8501 是否被占用
-3. 尝试指定端口：`streamlit run app.py --server.port 8502`
+### 3. gateway 转发失败
+- 确认 backend（:8001）已启动
+- 检查 gateway 日志中的转发错误 / 超时
 
 ### 4. API Key 错误
+1. 检查 `.env` 中的 Key 是否正确
+2. 确认账户有足够额度
 
-**问题**：模型调用返回认证错误
-
-**解决**：
-1. 检查 `.env` 文件中的 API Key 是否正确
-2. 确认 API Key 没有过期
-3. 检查账户是否有足够的额度
-
----
-
-## 📝 开发说明
-
-### 修改 Prompt
-
-编辑 `backend/config/prompts.py`：
-
-```python
-# 修改规划提示词
-PLANNER_SYSTEM_PROMPT = """你的自定义提示词..."""
-```
-
-### 调整模型参数
-
-编辑 `backend/config/settings.py`：
-
-```python
-# 模型温度
-QWEN3_TEMPERATURE = 0.7
-R1_TEMPERATURE = 0.1
-
-# RAG 分块大小
-RAG_CHUNK_SIZE = 500
-RAG_CHUNK_OVERLAP = 50
-```
-
-### 添加新工具
-
-1. 在 `tools/tool_registry.py` 中添加工具定义
-2. 在 `config/servers_config.json` 中配置对应的 MCP 服务器
-3. 在 `tools/mcp_tools.py` 中添加工具调用逻辑（如需要）
-
-### 添加新 Agent
-
-1. 在 `agent_nodes/` 目录下创建新的 Agent 文件
-2. 在 `graph/workflow.py` 中更新工作流定义
-3. 在 `graph/state.py` 中添加必要的状态字段
+### 5. 断点续跑不可用
+- 确认已安装 `langgraph-checkpoint-postgres` 且 PostgreSQL 可连
+- 未启用时服务降级为无 checkpointer 模式（仅失去续跑能力）
 
 ---
 
 ## 🤝 贡献指南
 
-欢迎提交 Issue 和 Pull Request！
-
 1. Fork 本项目
-2. 创建特性分支 (`git checkout -b feature/AmazingFeature`)
-3. 提交更改 (`git commit -m 'Add some AmazingFeature'`)
-4. 推送到分支 (`git push origin feature/AmazingFeature`)
+2. 创建特性分支（`git checkout -b feature/AmazingFeature`）
+3. 提交更改（`git commit -m 'Add some AmazingFeature'`）
+4. 推送到分支（`git push origin feature/AmazingFeature`）
 5. 开启 Pull Request
 
 ---
@@ -566,13 +420,3 @@ RAG_CHUNK_OVERLAP = 50
 ## 📄 许可证
 
 本项目采用 MIT 许可证。
-
----
-
-## 📧 联系方式
-
-如有问题或建议，请提交 Issue 或联系项目维护者。
-
----
-
-**祝您使用愉快！🎉**

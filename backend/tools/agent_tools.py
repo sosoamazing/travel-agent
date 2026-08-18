@@ -58,7 +58,7 @@ async def extract_travel_plan(
     logger.info("🔧 [extract_travel_plan] 开始提取旅行计划参数")
     logger.info(f"   用户查询: {user_query}")
 
-    qwen3_llm = _LLM(agent="planner", temperature=QWEN3_TEMPERATURE)
+    qwen3_llm = _LLM(agent="planner", temperature=QWEN3_TEMPERATURE, extra_body={"thinking": {"type": "disabled"}})
 
     try:
         qwen3_structured = qwen3_llm.with_structured_output(TravelPlanExtraction)

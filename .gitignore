@@ -180,8 +180,12 @@ cython_debug/
 .cursorignore
 .cursorindexingignore
 
-# 项目内误放的 Python 虚拟环境
-travel-agent/
+# 项目内 Python 虚拟环境（名为 travel-agent 的 venv）
+# 锚定到仓库根目录（前导 /），避免误伤其它同名子目录
+/travel-agent/
+# venv 标志文件：只要出现 pyvenv.cfg 即视为虚拟环境根，忽略整个目录
+# 兼容 Windows(Lib/Scripts) 与 POSIX(bin) 布局，防止 venv 被误提交
+pyvenv.cfg
 
 # 遗留的本地 SQLite 数据文件（已迁移到 PostgreSQL）
 data/*.db

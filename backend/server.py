@@ -112,7 +112,13 @@ class _AdminCreateReq(BaseModel):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """启动时预热业务层并初始化 LangGraph Postgres checkpointer。"""
+    """启动时预热业务层、初始化 LangGraph Postgres checkpointer，并预热 DB 连接池。"""
+    # 预热 DB 连接池（原为懒加载，首个请求才建池；提前建好避免首个请求冷启动慢）
+    try:
+        from db import _ensure_async_pool
+        await _ensure_async_pool()
+    except Exception as e:
+        print(f"⚠️ [DB] 连接池预热失败（{e}）")
     service = get_service()
     await service.setup()
     yield

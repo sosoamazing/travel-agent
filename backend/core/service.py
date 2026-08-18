@@ -438,6 +438,7 @@ class TravelService:
             reset_observability()
             _token_tracker.reset()
             obs_task_id = await start_task(
+                record.task_id,   # 业务 task_id（= checkpoint thread_id）
                 user_id=record.user_id or "",
                 session_id=record.session_id or "",
                 user_query=record.user_query,

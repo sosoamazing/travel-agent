@@ -1,0 +1,69 @@
+# =============================================================================
+# 生产精确锁定依赖（requirements.lock.txt）
+# -----------------------------------------------------------------------------
+# 所有依赖均用 == 精确锁定，保证 pip install 后行为可复现。
+# 本文件由 backend/requirements.txt（>= 兼容下限）+ 当前 venv 的实际安装版本
+# 对齐生成。升级时请先在 venv 内 pip install -U <pkg>，再据此文件回填新版本。
+#
+# 说明：
+#   - psycopg 原写法 psycopg[binary,pool]>=3.2.0 的方括号 extras 在旧版 pip 上
+#     可能不生效，故此处拆成三个具体包（psycopg / psycopg-binary / psycopg-pool）
+#     显式锁定，规避隐式依赖缺失。
+#   - uvicorn[standard] 的 extras+pin 形式在所有 pip 版本均可正常解析，保留原写法。
+# =============================================================================
+
+# LangChain 核心依赖
+langchain==1.3.14
+langchain-openai==1.4.1
+langchain-community==0.4.2
+langchain-chroma==1.1.0
+langgraph==1.2.9
+
+# 向量数据库
+chromadb==1.5.9
+
+# LLM 提供商
+dashscope==1.26.4  # Qwen
+openai==2.48.0      # OpenAI API兼容
+
+# MCP 工具 (需要openai-agents作为MCP客户端)
+mcp==1.28.1
+openai-agents==0.18.3
+
+# 消息队列 (MQ) - 每个 MCP 服务器独立的内存消息队列 + 速率限制
+# aiolimiter: 异步令牌桶速率限制库（默认每 0.4 秒最多 1 次调用，见 config.settings）
+aiolimiter==1.2.1
+
+# Streamlit UI
+streamlit==1.61.1
+
+# 数据库 - PostgreSQL
+psycopg2-binary==2.9.12   # PostgreSQL 同步驱动（含连接池 ThreadedConnectionPool）
+SQLAlchemy==2.0.51        # SQLAlchemy 2.0 异步 ORM/连接池
+asyncpg==0.31.0           # PostgreSQL asyncpg 异步驱动
+
+# FastAPI 服务化
+fastapi==0.141.1
+uvicorn[standard]==0.52.3
+httpx==0.28.1          # gateway 转发 backend 的 HTTP 客户端
+pydantic-settings==2.14.2
+python-json-logger==4.1.0  # 结构化 JSON 日志
+
+# JWT 认证
+bcrypt==5.0.0          # 密码哈希
+PyJWT==2.13.0          # JWT 令牌签发/校验
+
+# LangGraph 断点续跑（Postgres checkpoint）
+langgraph-checkpoint-postgres==3.1.2   # PostgresSaver / AsyncPostgresSaver
+# 原 psycopg[binary,pool] 拆分为显式三包，避免旧版 pip extras 不生效：
+psycopg==3.3.4                         # psycopg3 主包（checkpoint 专用）
+psycopg-binary==3.3.4                  # psycopg3 预编译二进制
+psycopg-pool==3.3.1                    # AsyncConnectionPool（checkpoint 专用）
+
+# 其他
+python-dotenv==1.2.2
+pydantic==2.13.4
+requests==2.34.2          # Streamlit 前端通过 HTTP 调用 FastAPI
+nest-asyncio==1.6.0
+numpy==2.5.1             # 语义检索中计算余弦相似度
+diskcache==5.6.3          # 本地磁盘级持久化缓存（工具查询/RAG 结果）

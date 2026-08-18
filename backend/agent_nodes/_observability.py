@@ -1,10 +1,12 @@
-"""观测追踪：任务 / 节点 / LLM / MCP 调用聚合为「平均值」后持久化到 PostgreSQL。
+"""观测追踪：span 树模型（节点 / LLM / MCP 逐调用 span，开始占位 + 结束更新）。
 
 设计要点：
-- 执行期间用 contextvars + 内存累加器按维度聚合，end_task 时批量落库。
-- 版本号：每次任务记录当前代码版本（AGENT_VERSION，来自 git 短 commit / 环境变量）。
-- 聚合维度：LLM 按 (node × agent × model) 存平均 token / 平均耗时；MCP 按 (node × server × tool) 存平均耗时。
-- contextvars 保证 asyncio.gather 多城并发时各条调用仍归属正确的节点。
+- 任务开始：`start_task(task_id, ...)` 前置插入 obs_tasks（task_id=业务 uuid，无自增 id）。
+- 节点 / LLM / MCP：调用开始先 INSERT 占位行（status=running，拿到 span 行 id），
+  调用结束 UPDATE 补全 end_ts / 状态 / 指标。
+- duration_ms = end_ts - start_ts，不冗余存储；seq 由 start_ts 推导。
+- contextvars 保证 asyncio.gather 多城并发时各 span 归属正确的节点。
+- 本模块使用 psycopg3 异步连接池（async_db_connection），须在异步上下文调用。
 """
 from __future__ import annotations
 
@@ -13,15 +15,14 @@ import contextvars
 import functools
 import logging
 import time
-import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from config.settings import AGENT_VERSION
 from ._obs_storage import get_obs_storage
 
 logger = logging.getLogger(__name__)
 
-# 当前任务 id
+# 当前任务 id（业务 uuid）
 _current_task_id: "contextvars.ContextVar[Optional[str]]" = contextvars.ContextVar(
     "obs_current_task_id", default=None
 )
@@ -30,128 +31,33 @@ _current_node_name: "contextvars.ContextVar[Optional[str]]" = contextvars.Contex
     "obs_current_node_name", default=None
 )
 
-# 每个 task 的内存累加器（单进程单事件循环线程，key=task_id 安全）
-_accumulators: Dict[str, Dict[str, Any]] = {}
-
-
-def _acc(task_id: str) -> Dict[str, Any]:
-    acc = _accumulators.get(task_id)
-    if acc is None:
-        acc = {
-            "version": AGENT_VERSION,
-            "user_id": "", "session_id": "", "user_query": "",
-            "intent": "", "query_type": "",
-            "nodes": {},
-            "llm": {},
-            "mcp": {},
-        }
-        _accumulators[task_id] = acc
-    return acc
-
 
 # ──────────────────────────────────────────────────────────
 # 任务生命周期
 # ──────────────────────────────────────────────────────────
 
-async def start_task(user_id: str = "", session_id: str = "", user_query: str = "",
-                     intent: Optional[str] = None,
+async def start_task(task_id: str, user_id: str = "", session_id: str = "",
+                     user_query: str = "", intent: Optional[str] = None,
                      version: Optional[str] = None) -> str:
-    """开始一个任务，返回 task_id。"""
-    task_id = uuid.uuid4().hex
+    """任务开始：前置插入 obs_tasks 占位行（task_id=业务 uuid），返回 task_id。
+
+    调用方（core/service.py）传入业务 task_id（与 TaskRecord.task_id / checkpoint
+    thread_id 一致），本函数不再自行生成。
+    """
     ver = version or AGENT_VERSION
     await get_obs_storage().start_task(task_id, ver, user_id, session_id, user_query, intent=intent)
-    acc = _acc(task_id)
-    acc["version"] = ver
-    acc["user_id"] = user_id
-    acc["session_id"] = session_id
-    acc["user_query"] = user_query
-    acc["intent"] = intent or ""
     _current_task_id.set(task_id)
     return task_id
 
 
 async def end_task(status: str = "ok", error: Optional[str] = None):
-    """结束当前任务：把内存累加结果求平均后批量落库，并补全任务汇总。"""
+    """结束当前任务：UPDATE obs_tasks 补全 end_ts / 状态。"""
     task_id = _current_task_id.get()
     if not task_id:
         return
-    acc = _accumulators.get(task_id)
-    if acc is None:
-        return
-
-    node_rows: List[Dict[str, Any]] = []
-    node_count = 0
-    for name, n in acc["nodes"].items():
-        inv = int(n["invocations"])
-        node_count += inv
-        node_rows.append({
-            "node": name,
-            "invocations": inv,
-            "duration_ms_avg": round(n["dur_sum"] / inv, 2) if inv else 0.0,
-            "status": n["status"],
-            "error": n["error"],
-        })
-
-    llm_rows: List[Dict[str, Any]] = []
-    llm_call_count = 0
-    total_input = 0
-    total_output = 0
-    total_cached = 0
-    llm_dur = 0.0
-    for (node, agent, model), v in acc["llm"].items():
-        calls = int(v["calls"])
-        llm_call_count += calls
-        total_input += int(v["in_sum"])
-        total_output += int(v["out_sum"])
-        total_cached += int(v["cached_sum"])
-        llm_dur += float(v["dur_sum"])
-        llm_rows.append({
-            "node": node, "agent": agent, "model": model,
-            "calls": calls,
-            "input_tokens_avg": round(v["in_sum"] / calls, 2) if calls else 0.0,
-            "output_tokens_avg": round(v["out_sum"] / calls, 2) if calls else 0.0,
-            "cached_tokens_avg": round(v["cached_sum"] / calls, 2) if calls else 0.0,
-            "duration_ms_avg": round(v["dur_sum"] / calls, 2) if calls else 0.0,
-            "error_count": int(v["error_count"]),
-            "error": v["error"],
-        })
-
-    mcp_rows: List[Dict[str, Any]] = []
-    tool_call_count = 0
-    tool_dur = 0.0
-    for (node, server, tool), v in acc["mcp"].items():
-        calls = int(v["calls"])
-        tool_call_count += calls
-        tool_dur += float(v["dur_sum"])
-        mcp_rows.append({
-            "node": node, "server": server, "tool": tool,
-            "calls": calls,
-            "duration_ms_avg": round(v["dur_sum"] / calls, 2) if calls else 0.0,
-            "error_count": int(v["error_count"]),
-            "retries": int(v["retries"]),
-            "error": v["error"],
-        })
-
-    summary = {
-        "node_count": node_count,
-        "llm_call_count": llm_call_count,
-        "tool_call_count": tool_call_count,
-        "total_input_tokens": total_input,
-        "total_output_tokens": total_output,
-        "cached_input_tokens": total_cached,
-        "llm_duration_ms": round(llm_dur, 2),
-        "tool_duration_ms": round(tool_dur, 2),
-        "intent": acc["intent"],
-        "query_type": acc.get("query_type", ""),
-    }
-
-    storage = get_obs_storage()
-    await storage.insert_node_metrics(task_id, node_rows)
-    await storage.insert_llm_metrics(task_id, llm_rows)
-    await storage.insert_mcp_metrics(task_id, mcp_rows)
-    await storage.end_task(task_id, status, error, summary)
-
-    _accumulators.pop(task_id, None)
+    await get_obs_storage().end_task(task_id, status, error, summary={})
+    _current_task_id.set(None)
+    _current_node_name.set(None)
 
 
 def reset_observability():
@@ -160,232 +66,278 @@ def reset_observability():
     _current_node_name.set(None)
 
 
-def get_current_llm_id() -> Optional[str]:
-    """兼容 shim：聚合模型下不再需要 LLM span id，始终返回 None。"""
-    return None
+async def record_query_type(query_type: str):
+    """记录 classify 节点的实际分类结果（写入 obs_tasks.query_type，供与标注意图对比）。"""
+    task_id = _current_task_id.get()
+    if not task_id:
+        return
+    try:
+        await get_obs_storage().update_task_query_type(task_id, query_type)
+    except Exception as e:
+        logger.warning(f"⚠️ 记录 query_type 失败: {e}")
 
 
 # ──────────────────────────────────────────────────────────
-# 中间层上报接口（LLM / MCP）
+# 节点 span（async 成对：start_node / end_node）
 # ──────────────────────────────────────────────────────────
 
-def record_llm(agent: str, model: str, input_tokens: int, output_tokens: int,
-               duration_ms: float, status: str = "ok", error: Optional[str] = None,
-               cached_input_tokens: int = 0, output: str = "") -> str:
-    """累加一次 LLM 调用到内存聚合器（不再逐条落库）。
+async def start_node(name: str) -> int:
+    """节点调用开始：插入 node span 占位行，返回该 span 行 id。"""
+    task_id = _current_task_id.get()
+    if not task_id:
+        return 0
+    _current_node_name.set(name)
+    span_id = await get_obs_storage().start_node_span(task_id, name)
+    return span_id
 
-    output 参数保留以兼容调用方，但聚合模型下不再存储输出内容。
+
+async def end_node(span_id: int, status: str = "ok", error: Optional[str] = None):
+    """节点调用结束：UPDATE node span 补全 end_ts / 状态。"""
+    if span_id:
+        await get_obs_storage().end_node_span(span_id, status, error)
+
+
+# ──────────────────────────────────────────────────────────
+# LLM span（async 成对：start_llm / end_llm）
+# ──────────────────────────────────────────────────────────
+
+async def start_llm(agent: str) -> int:
+    """LLM 调用开始：插入 llm span 占位行，返回该 span 行 id。
+
+    流式调用同样只在此占位，流式过程中不写库，结束才 end_llm。
     """
     task_id = _current_task_id.get()
     if not task_id:
-        return ""
-    acc = _accumulators.get(task_id)
-    if acc is None:
-        return ""
+        return 0
     node = _current_node_name.get() or ""
-    key = (node, agent, model)
-    v = acc["llm"].setdefault(key, {
-        "calls": 0, "in_sum": 0, "out_sum": 0, "cached_sum": 0,
-        "dur_sum": 0.0, "error_count": 0, "error": None,
-    })
-    v["calls"] += 1
-    v["in_sum"] += int(input_tokens or 0)
-    v["out_sum"] += int(output_tokens or 0)
-    v["cached_sum"] += int(cached_input_tokens or 0)
-    v["dur_sum"] += float(duration_ms or 0)
-    if status == "error":
-        v["error_count"] += 1
-        if v["error"] is None:
-            v["error"] = error
-    return ""
+    span_id = await get_obs_storage().start_llm_span(task_id, node, agent)
+    return span_id
 
 
-def record_query_type(query_type: str):
-    """记录 classify 节点的实际分类结果（用于与前端标注意图对比）。"""
-    task_id = _current_task_id.get()
-    if not task_id:
-        return
-    acc = _accumulators.get(task_id)
-    if acc is None:
-        return
-    acc["query_type"] = query_type
-
-
-def record_mcp(server: str, tool: str, duration_ms: float, status: str = "ok",
-               retries: int = 0, error: Optional[str] = None, result: str = "") -> str:
-    """累加一次 MCP 工具调用到内存聚合器。"""
-    task_id = _current_task_id.get()
-    if not task_id:
-        return ""
-    acc = _accumulators.get(task_id)
-    if acc is None:
-        return ""
-    node = _current_node_name.get() or ""
-    key = (node, server, tool)
-    v = acc["mcp"].setdefault(key, {
-        "calls": 0, "dur_sum": 0.0, "error_count": 0, "retries": 0, "error": None,
-    })
-    v["calls"] += 1
-    v["dur_sum"] += float(duration_ms or 0)
-    v["retries"] += int(retries or 0)
-    if status == "error":
-        v["error_count"] += 1
-        if v["error"] is None:
-            v["error"] = error
-    return ""
+async def end_llm(span_id: int, status: str = "ok", error: Optional[str] = None,
+                  input_tokens: int = 0, output_tokens: int = 0,
+                  cached_tokens: int = 0, output: str = "") -> None:
+    """LLM 调用结束：UPDATE llm span 补全 end_ts / token / output / 状态。"""
+    if span_id:
+        await get_obs_storage().end_llm_span(
+            span_id, status, error,
+            input_tokens=input_tokens, output_tokens=output_tokens,
+            cached_tokens=cached_tokens, output=output,
+        )
 
 
 # ──────────────────────────────────────────────────────────
-# 作用域 / 装饰器
+# MCP span（async 成对：start_mcp / end_mcp）
 # ──────────────────────────────────────────────────────────
 
-def _finish_node(name: str, start: float, status: str, error: Optional[str] = None):
+async def start_mcp(server: str, tool: str) -> int:
+    """MCP 调用开始：插入 mcp span 占位行，返回该 span 行 id。"""
     task_id = _current_task_id.get()
     if not task_id:
-        return
-    acc = _accumulators.get(task_id)
-    if acc is None:
-        return
-    dur = (time.perf_counter() - start) * 1000
-    n = acc["nodes"].setdefault(name, {
-        "invocations": 0, "dur_sum": 0.0, "status": "ok", "error": None,
-    })
-    n["invocations"] += 1
-    n["dur_sum"] += dur
-    if status == "error":
-        n["status"] = "error"
-        if n["error"] is None:
-            n["error"] = error
+        return 0
+    node = _current_node_name.get() or ""
+    span_id = await get_obs_storage().start_mcp_span(task_id, node, server, tool)
+    return span_id
 
 
-@contextlib.contextmanager
-def node_scope(name: str):
-    """为并发子图/子任务建立独立节点观测上下文，并把节点耗时累加进内存聚合器。"""
-    token = _current_node_name.set(name)
-    start = time.perf_counter()
-    logger.info(f"▶️ [{name}] 开始")
+async def end_mcp(span_id: int, status: str = "ok", error: Optional[str] = None,
+                  retries: int = 0) -> None:
+    """MCP 调用结束：UPDATE mcp span 补全 end_ts / retries / 状态。"""
+    if span_id:
+        await get_obs_storage().end_mcp_span(span_id, status, error, retries=retries)
+
+
+# ──────────────────────────────────────────────────────────
+# 节点装饰器 / 作用域（async 封装，供各 agent 节点使用）
+# ──────────────────────────────────────────────────────────
+
+@contextlib.asynccontextmanager
+async def node_scope(name: str):
+    """为并发子图/子任务建立独立节点观测上下文（async context manager）。
+
+    用法：async with node_scope("city_plan"): ...
+    """
+    task_id = _current_task_id.get()
+    span_id = 0
+    if task_id:
+        span_id = await get_obs_storage().start_node_span(task_id, name)
+    prev_node = _current_node_name.get()
+    _current_node_name.set(name)
     try:
         yield
     except Exception as e:
-        _finish_node(name, start, "error", str(e))
-        logger.error(f"❌ [{name}] 失败（{(time.perf_counter() - start) * 1000:.1f}ms）: {e}", exc_info=True)
+        if span_id:
+            await get_obs_storage().end_node_span(span_id, "error", str(e))
         raise
     else:
-        _finish_node(name, start, "ok")
-        logger.info(f"✅ [{name}] 完成，耗时 {(time.perf_counter() - start) * 1000:.1f}ms")
+        if span_id:
+            await get_obs_storage().end_node_span(span_id, "ok", None)
     finally:
-        _current_node_name.reset(token)
-
-
-@contextlib.contextmanager
-def correction_scope(parent_llm_span_id: Optional[str]):
-    """兼容 shim：聚合模型下无需 correction 树，直接透传。"""
-    yield
+        if prev_node:
+            _current_node_name.set(prev_node)
+        else:
+            _current_node_name.set(None)
 
 
 def node(name: str):
-    """节点装饰器：设置当前节点上下文 + 记录节点起止耗时 + 异常兜底上报。"""
+    """节点装饰器：设置当前节点上下文 + 记录 node span（开始占位 / 结束补全）。"""
     def deco(fn):
         @functools.wraps(fn)
         async def wrapper(state, *args, **kwargs):
-            token = _current_node_name.set(name)
-            start = time.perf_counter()
-            logger.info(f"▶️ [{name}] 开始")
+            task_id = _current_task_id.get()
+            span_id = 0
+            if task_id:
+                span_id = await get_obs_storage().start_node_span(task_id, name)
+            prev_node = _current_node_name.get()
+            _current_node_name.set(name)
             try:
                 result = await fn(state, *args, **kwargs)
-                _finish_node(name, start, "ok")
-                logger.info(f"✅ [{name}] 完成，耗时 {(time.perf_counter() - start) * 1000:.1f}ms")
+                if span_id:
+                    await get_obs_storage().end_node_span(span_id, "ok", None)
                 return result
             except Exception as e:
-                _finish_node(name, start, "error", str(e))
-                logger.error(f"❌ [{name}] 失败（{(time.perf_counter() - start) * 1000:.1f}ms）: {e}", exc_info=True)
+                if span_id:
+                    await get_obs_storage().end_node_span(span_id, "error", str(e))
                 raise
             finally:
-                _current_node_name.reset(token)
+                if prev_node:
+                    _current_node_name.set(prev_node)
+                else:
+                    _current_node_name.set(None)
         return wrapper
     return deco
 
 
 # ──────────────────────────────────────────────────────────
-# 读时组装：聚合表 → 任务 json
+# 读时组装：obs_tasks + 三张 span 表 → 任务 trace JSON
 # ──────────────────────────────────────────────────────────
 
 async def build_task_json(task_id: str) -> Dict[str, Any]:
-    """从 DB 读取聚合表并组装成任务 json（summary + nodes[]，含版本号）。"""
+    """从 DB 读取任务 + 三张 span 表，组装成任务 trace JSON。
+
+    返回结构：
+    {
+      "task_id": str,
+      "summary": { node_count / llm_call_count / tool_call_count / tokens / duration_ms ... },
+      "nodes": [
+        { "node": str, "status": str, "error": str, "duration_ms": float,
+          "llm": [ {agent, model(反查), input_tokens, output_tokens, cached_tokens, output, duration_ms, status} ],
+          "tools": [ {server, tool, duration_ms, retries, status} ] },
+        ...
+      ],
+      "model_map": { agent: model }   # 模型名按 agent 从配置反查
+    }
+    """
     storage = get_obs_storage()
     task = await storage.get_task(task_id)
-    node_rows = await storage.get_node_metrics(task_id)
-    llm_rows = await storage.get_llm_metrics(task_id)
-    mcp_rows = await storage.get_mcp_metrics(task_id)
+    nodes = await storage.get_node_spans(task_id)
+    llms = await storage.get_llm_spans(task_id)
+    mcps = await storage.get_mcp_spans(task_id)
 
-    empty_summary = {
+    empty = {
         "node_count": 0, "llm_call_count": 0, "tool_call_count": 0,
         "total_input_tokens": 0, "total_output_tokens": 0, "total_tokens": 0,
         "cached_input_tokens": 0, "cache_hit_rate": None,
         "llm_duration_ms": 0.0, "tool_duration_ms": 0.0, "wall_clock_ms": 0.0,
-        "version": "",
+        "status": "unknown", "version": "",
     }
     if task is None:
-        return {"summary": empty_summary, "nodes": []}
+        return {"task_id": task_id, "summary": empty, "nodes": [], "model_map": {}}
 
-    total_input = int(task.get("total_input_tokens") or 0)
-    total_output = int(task.get("total_output_tokens") or 0)
-    total_cached = int(task.get("cached_input_tokens") or 0)
+    # 按 node 分组 llm/mcp
+    llm_by_node: Dict[str, list] = {}
+    mcp_by_node: Dict[str, list] = {}
+    for l in llms:
+        llm_by_node.setdefault(l.get("node") or "", []).append(l)
+    for m in mcps:
+        mcp_by_node.setdefault(m.get("node") or "", []).append(m)
+
+    node_out = []
+    total_in = total_out = total_cached = 0
+    llm_dur = tool_dur = 0.0
+    for n in nodes:
+        name = n.get("node") or "?"
+        child_llm = llm_by_node.get(name, [])
+        child_mcp = mcp_by_node.get(name, [])
+        for l in child_llm:
+            total_in += int(l.get("input_tokens") or 0)
+            total_out += int(l.get("output_tokens") or 0)
+            total_cached += int(l.get("cached_tokens") or 0)
+            llm_dur += _dur_ms(l)
+        for m in child_mcp:
+            tool_dur += _dur_ms(m)
+        node_out.append({
+            "node": name,
+            "status": n.get("status") or "ok",
+            "error": n.get("error"),
+            "duration_ms": _dur_ms(n),
+            "llm": [_llm_item(l) for l in child_llm],
+            "tools": [_mcp_item(m) for m in child_mcp],
+        })
+
+    node_out.sort(key=lambda x: x["duration_ms"], reverse=True)
+
+    # 模型名反查
+    from config.settings import get_agent_model, QWEN3_MODEL, DS_FLASH_MODEL
+    model_map = {}
+    for l in llms:
+        agent = l.get("agent") or ""
+        if agent and agent not in model_map:
+            model_map[agent] = get_agent_model(agent, QWEN3_MODEL if agent not in ("summarizer", "json_fix", "hotel_price") else DS_FLASH_MODEL)
+
     summary = {
-        "node_count": int(task.get("node_count") or 0),
-        "llm_call_count": int(task.get("llm_call_count") or 0),
-        "tool_call_count": int(task.get("tool_call_count") or 0),
-        "total_input_tokens": total_input,
-        "total_output_tokens": total_output,
-        "total_tokens": total_input + total_output,
+        "node_count": len(nodes),
+        "llm_call_count": len(llms),
+        "tool_call_count": len(mcps),
+        "total_input_tokens": total_in,
+        "total_output_tokens": total_out,
+        "total_tokens": total_in + total_out,
         "cached_input_tokens": total_cached,
-        "cache_hit_rate": round(total_cached / total_input, 4) if total_input > 0 else None,
-        "llm_duration_ms": float(task.get("llm_duration_ms") or 0),
-        "tool_duration_ms": float(task.get("tool_duration_ms") or 0),
-        "wall_clock_ms": float(task.get("duration_ms") or 0),
+        "cache_hit_rate": round(total_cached / total_in, 4) if total_in > 0 else None,
+        "llm_duration_ms": round(llm_dur, 2),
+        "tool_duration_ms": round(tool_dur, 2),
+        "wall_clock_ms": _dur_ms(task),
+        "status": task.get("status") or "unknown",
         "version": task.get("version") or "",
         "intent": task.get("intent") or "",
         "query_type": task.get("query_type") or "",
+        "error": task.get("error"),
     }
 
-    node_by_name: Dict[str, Dict[str, Any]] = {}
-    for n in node_rows:
-        node_by_name[n["node"]] = {
-            "node": n["node"],
-            "duration_ms": float(n.get("duration_ms_avg") or 0),
-            "status": n.get("status") or "ok",
-            "error": n.get("error"),
-            "llm": [],
-            "tools": [],
-        }
+    return {"task_id": task_id, "summary": summary, "nodes": node_out, "model_map": model_map}
 
-    for l in llm_rows:
-        node = node_by_name.get(l["node"])
-        if node is None:
-            continue
-        node["llm"].append({
-            "agent": l.get("agent"),
-            "model": l.get("model"),
-            "calls": int(l.get("calls") or 0),
-            "input_tokens_avg": float(l.get("input_tokens_avg") or 0),
-            "output_tokens_avg": float(l.get("output_tokens_avg") or 0),
-            "cached_tokens_avg": float(l.get("cached_tokens_avg") or 0),
-            "duration_ms_avg": float(l.get("duration_ms_avg") or 0),
-            "error_count": int(l.get("error_count") or 0),
-        })
 
-    for m in mcp_rows:
-        node = node_by_name.get(m["node"])
-        if node is None:
-            continue
-        node["tools"].append({
-            "server": m.get("server"),
-            "tool": m.get("tool"),
-            "calls": int(m.get("calls") or 0),
-            "duration_ms_avg": float(m.get("duration_ms_avg") or 0),
-            "retries": int(m.get("retries") or 0),
-            "error_count": int(m.get("error_count") or 0),
-        })
+def _dur_ms(row: Dict[str, Any]) -> float:
+    """从 start_ts/end_ts 推导耗时（毫秒）；缺失返回 0。"""
+    try:
+        s = float(row.get("start_ts") or 0)
+        e = float(row.get("end_ts") or 0)
+        if s and e:
+            return round((e - s) * 1000, 2)
+    except Exception:
+        pass
+    return 0.0
 
-    nodes = sorted(node_by_name.values(), key=lambda x: x["node"] or "")
-    return {"summary": summary, "nodes": nodes}
+
+def _llm_item(l: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "agent": l.get("agent"),
+        "input_tokens": int(l.get("input_tokens") or 0),
+        "output_tokens": int(l.get("output_tokens") or 0),
+        "cached_tokens": int(l.get("cached_tokens") or 0),
+        "output": l.get("output"),
+        "duration_ms": _dur_ms(l),
+        "status": l.get("status") or "ok",
+        "error": l.get("error"),
+    }
+
+
+def _mcp_item(m: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "server": m.get("server"),
+        "tool": m.get("tool"),
+        "duration_ms": _dur_ms(m),
+        "retries": int(m.get("retries") or 0),
+        "status": m.get("status") or "ok",
+        "error": m.get("error"),
+    }
