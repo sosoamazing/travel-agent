@@ -41,6 +41,57 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from monitor.db import get_connection  # noqa: E402
 
+
+# ──────────────────────────────────────────────────────────────
+# 模型参数反查（agent → 真实模型名）
+# ──────────────────────────────────────────────────────────────
+# 设计文档：LLM 模型名不存表（obs_llm_spans 只存 agent），合并展示时按配置反查。
+# 此处直接读取 backend/config/settings.py 的 get_agent_model（含 .env 的 LLM_MODEL_<AGENT> 覆盖），
+# 与观测层 build_task_json 的 model_map 保持同源一致。
+# monitor 独立服务虽不 import backend 业务代码，但 config 仅含 os.getenv 常量，无重依赖，可安全读取。
+_BACKEND_DIR = PROJECT_ROOT / "backend"
+if str(_BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(_BACKEND_DIR))
+
+# 主模型 / flash 模型（懒加载，加载失败时降级为空，反查回退为 agent 名）
+_MAIN_MODEL: str = ""
+_FLASH_MODEL: str = ""
+_FLASH_AGENTS = {"summarizer", "json_fix", "hotel_price"}
+
+
+def _load_model_config() -> bool:
+    """懒加载 backend/config/settings 的模型常量；失败返回 False（monitor 独立运行不致命）。"""
+    global _MAIN_MODEL, _FLASH_MODEL
+    if _MAIN_MODEL:
+        return True
+    try:
+        from config import settings as _cfg  # noqa: WPS433  (懒加载，独立服务避免启动强依赖)
+        _MAIN_MODEL = _cfg.QWEN3_MODEL
+        _FLASH_MODEL = _cfg.DS_FLASH_MODEL
+        return True
+    except Exception:
+        return False
+
+
+def get_agent_model(agent: str) -> str:
+    """反查 agent 对应的真实模型名；无配置或加载失败时回退为 agent 名本身。
+
+    覆盖规则（与 backend/config/settings.get_agent_model 一致）：
+      1. .env 中 LLM_MODEL_<AGENT> 显式覆盖优先；
+      2. summarizer / json_fix / hotel_price 默认 flash；
+      3. 其余默认主模型（QWEN3_MODEL）。
+    """
+    if not _load_model_config():
+        return agent
+    try:
+        from config import settings as _cfg  # noqa: WPS433
+        default = _FLASH_MODEL if agent in _FLASH_AGENTS else _MAIN_MODEL
+        return _cfg.get_agent_model(agent, default)
+    except Exception:
+        return agent
+
+
+
 # backend 运行期写入观测 JSON 的目录（仅作 JSON 回退数据源，不 import backend）
 DATA_DIR = PROJECT_ROOT / "backend" / "data"
 OBS_JSON_PATH = DATA_DIR / "observability.json"
@@ -293,7 +344,7 @@ def load_from_db(limit: int = 50, version: Optional[str] = None) -> List[Dict[st
             llm_output = sum(int(l.get("output_tokens") or 0) for l in child_llm)
             llm_cached = sum(int(l.get("cached_tokens") or 0) for l in child_llm)
             llm_dur = sum(_span_dur(l) for l in child_llm)
-            llm_errs = sum(1 for l in child_llm if l.get("status") == "error")
+            llm_errs = sum(1 for l in child_llm if l.get("result_kind") == "error")
 
             tool_agg: Dict[str, Dict[str, Any]] = {}
             for m in child_mcp:
@@ -309,7 +360,7 @@ def load_from_db(limit: int = 50, version: Optional[str] = None) -> List[Dict[st
                 item["calls"] += 1
                 item["duration_ms"] += _span_dur(m)
                 item["retries"] += int(m.get("retries") or 0)
-                if m.get("status") == "error":
+                if m.get("result_kind") == "error":
                     item["errors"] += 1
             node_tools = list(tool_agg.values())
             for item in node_tools:
@@ -321,7 +372,7 @@ def load_from_db(limit: int = 50, version: Optional[str] = None) -> List[Dict[st
             for l in child_llm:
                 agent = l.get("agent") or "unknown"
                 a = _agent_acc.setdefault(agent, {
-                    "agent": agent, "calls": 0,
+                    "agent": agent, "model": get_agent_model(agent), "calls": 0,
                     "input_tokens": 0, "output_tokens": 0, "cached_input_tokens": 0,
                     "duration_ms": 0.0, "error_count": 0,
                 })
@@ -330,7 +381,7 @@ def load_from_db(limit: int = 50, version: Optional[str] = None) -> List[Dict[st
                 a["output_tokens"] += int(l.get("output_tokens") or 0)
                 a["cached_input_tokens"] += int(l.get("cached_tokens") or 0)
                 a["duration_ms"] += _span_dur(l)
-                if l.get("status") == "error":
+                if l.get("result_kind") == "error":
                     a["error_count"] += 1
             node_agents = list(_agent_acc.values())
             for a in node_agents:
@@ -341,7 +392,7 @@ def load_from_db(limit: int = 50, version: Optional[str] = None) -> List[Dict[st
             per_node[name] = {
                 "invocations": 1,
                 "duration_ms": _span_dur(nr),
-                "status": nr.get("status") or "ok",
+                "status": nr.get("result_kind") or "ok",
                 "llm_calls": llm_calls,
                 "mcp_calls": len(child_mcp),
                 "llm": {
@@ -374,14 +425,14 @@ def load_from_db(limit: int = 50, version: Optional[str] = None) -> List[Dict[st
             per_agent[agent]["output_tokens"] += out
             per_agent[agent]["call_count"] += 1
             per_agent[agent]["duration_ms"] += dur
-            # 模型名不存表（monitor 独立服务无法反查配置），per_model 暂以 agent 为键
-            model = agent
+            # 模型名不存表（obs_llm_spans 只存 agent），展示时按配置反查真实模型名（get_agent_model）
+            model = get_agent_model(agent)
             per_model[model]["input_tokens"] += inp
             per_model[model]["output_tokens"] += out
             per_model[model]["cached_input_tokens"] += int(l.get("cached_tokens") or 0)
             per_model[model]["call_count"] += 1
-            if l.get("status") == "error" and l.get("error"):
-                llm_errors.append({"agent": agent, "model": agent, "error": l.get("error") or ""})
+            if l.get("result_kind") == "error" and l.get("error_what"):
+                llm_errors.append({"agent": agent, "model": model, "error": l.get("error_what") or ""})
 
         # per_tool / tool_errors
         per_tool: Dict[str, Dict[str, float]] = defaultdict(
@@ -395,9 +446,9 @@ def load_from_db(limit: int = 50, version: Optional[str] = None) -> List[Dict[st
             per_tool[key]["call_count"] += 1
             per_tool[key]["duration_ms"] += _span_dur(m)
             per_tool[key]["retries"] += int(m.get("retries") or 0)
-            if m.get("status") == "error":
+            if m.get("result_kind") == "error":
                 per_tool[key]["error_count"] += 1
-                tool_errors.append({"server": server, "tool": tool, "error": m.get("error") or ""})
+                tool_errors.append({"server": server, "tool": tool, "error": m.get("error_what") or ""})
 
         # summary：从 span 表动态聚合
         llm_rows_sum = llm_rows
@@ -428,8 +479,8 @@ def load_from_db(limit: int = 50, version: Optional[str] = None) -> List[Dict[st
             "version": t.get("version") or "",
             "start_ts": float(t.get("start_ts") or 0),
             "duration_ms": float(t.get("duration_ms") or 0),
-            "status": t.get("status") or "?",
-            "error": t.get("error"),
+            "status": t.get("result_kind") or "?",
+            "error": t.get("error_what"),
             "intent": t.get("intent") or "",
             "query_type": t.get("query_type") or "",
             "client_duration_ms": t.get("client_duration_ms"),
@@ -626,6 +677,8 @@ def build_report(tasks: List[Dict[str, Any]]) -> Dict[str, Any]:
 
     total = len(tasks)
     ok_count = sum(1 for t in tasks if t["status"] == "ok")
+    error_count = sum(1 for t in tasks if t["status"] == "error")
+    running_count = sum(1 for t in tasks if t["status"] == "running")
     durations = [t["duration_ms"] for t in tasks if t["duration_ms"] > 0]
     wall = stats(durations)
 
@@ -670,7 +723,7 @@ def build_report(tasks: List[Dict[str, Any]]) -> Dict[str, Any]:
                 item = node_agents[name].get(agent)
                 if item is None:
                     item = {
-                        "agent": agent, "model": a.get("model") or "unknown",
+                        "agent": agent, "model": a.get("model") or get_agent_model(agent),
                         "calls": 0, "input_tokens": 0, "output_tokens": 0,
                         "cached_input_tokens": 0, "duration_ms": 0.0, "error_count": 0,
                     }
@@ -854,7 +907,8 @@ def build_report(tasks: List[Dict[str, Any]]) -> Dict[str, Any]:
     return {
         "task_count": total,
         "success_count": ok_count,
-        "error_count": total - ok_count,
+        "error_count": error_count,
+        "running_count": running_count,
         "success_rate": round(ok_count / total * 100, 1),
         "duration": wall,
         "client_duration": client_stats,

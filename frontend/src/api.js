@@ -69,6 +69,7 @@ export const api = {
   chat: (userQuery, sessionId) =>
     request('/chat', { method: 'POST', body: { user_query: userQuery, session_id: sessionId } }),
   getTask: (taskId) => request(`/tasks/${taskId}`),
+  adminTrace: (taskId) => request(`/obs/${encodeURIComponent(taskId)}/trace`),
 }
 
 // 消费后端 SSE 流（用 fetch 读取，以支持 Authorization 头，EventSource 无法携带自定义头）

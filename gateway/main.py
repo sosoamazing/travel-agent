@@ -353,11 +353,25 @@ async def stream_task(task_id: str, username: str = Depends(get_current_user)) -
     )
 
 
-# ── 观测追踪 ───────────────────────────────────────────
+# ── 观测追踪（仅管理员可访问；管理员可查看白名单内测试用户任务）──
 
 @app.get("/obs/{task_id}")
-async def obs(task_id: str, username: str = Depends(get_current_user)) -> Dict[str, Any]:
-    r = await _require_client().get(f"/internal/obs/{task_id}", params={"user_id": username})
+async def obs(task_id: str, _: str = Depends(get_current_admin)) -> Dict[str, Any]:
+    r = await _require_client().get(
+        f"/internal/obs/{task_id}",
+        params={"is_admin": "true", "user_id": "admin"},
+    )
+    if r.status_code >= 400:
+        _raise_backend_error(r)
+    return r.json()
+
+
+@app.get("/obs/{task_id}/trace")
+async def obs_trace(task_id: str, _: str = Depends(get_current_admin)) -> Dict[str, Any]:
+    r = await _require_client().get(
+        f"/internal/obs/{task_id}/trace",
+        params={"is_admin": "true", "user_id": "admin"},
+    )
     if r.status_code >= 400:
         _raise_backend_error(r)
     return r.json()

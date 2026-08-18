@@ -7,7 +7,7 @@
   - 每个任务的端到端耗时
 
 前置条件：
-  1) backend 已启动：   uvicorn server:app --host 0.0.0.0 --port 8001 --app-dir .
+  1) backend 已启动：   uvicorn server:app --host 127.0.0.1 --port 8001 --app-dir .
   2) gateway 已启动：   uvicorn gateway.main:app --host 0.0.0.0 --port 8000
   3) DB / MCP 正常（health 接口 status=ok）
 

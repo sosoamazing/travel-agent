@@ -48,6 +48,10 @@ def get_agent_model(agent: str, default: str) -> str:
 # ========== 重试 / 并发配置 ==========
 # JSON 格式修正最大重试次数（tools/json_utils.fix_json_with_flash）
 JSON_FIX_MAX_ATTEMPTS = int(os.getenv("JSON_FIX_MAX_ATTEMPTS", "3"))
+
+# 管理员可查看的测试用户 id 白名单（逗号分隔；obs/trace 仅管理员可访问时，
+# 用于放行这些测试用户名下任务的观测查询，便于压测/联调复盘）。
+OBS_ADMIN_USER_IDS = {s.strip() for s in os.getenv("OBS_ADMIN_USER_IDS", "").split(",") if s.strip()}
 # 城内规划并发上限（0 = 不限并发，全部城市同时执行）
 CITY_PLAN_MAX_CONCURRENCY = int(os.getenv("CITY_PLAN_MAX_CONCURRENCY", "3"))
 # 预算超支 / 时间非法时的最大自动重规划次数

@@ -195,14 +195,14 @@ class MCPToolManager:
                     timeout=MCP_TIMEOUT_SEC,
                 )
         except asyncio.TimeoutError:
-            await end_mcp(span_id, status="error", error="timeout",
+            await end_mcp(span_id, result="timeout", error_what="mcp timeout",
                           retries=stats.get("retries", 0))
             raise
         except Exception as e:
-            await end_mcp(span_id, status="error", error=str(e),
+            await end_mcp(span_id, result="error", error_what=str(e),
                           retries=stats.get("retries", 0))
             raise
-        await end_mcp(span_id, status="ok", retries=stats.get("retries", 0))
+        await end_mcp(span_id, result="ok", retries=stats.get("retries", 0))
         return result
 
     async def _call_tool_on_mcp_loop(self, server_name: str, tool_name: str, max_retries: int = 2,

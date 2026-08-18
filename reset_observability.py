@@ -38,14 +38,19 @@ PG_USER = os.getenv("PG_USER", "travel_agent")
 PG_PASSWORD = os.getenv("PG_PASSWORD", "travel_agent")
 PG_DATABASE = os.getenv("PG_DATABASE", "travel_agent")
 
-# 全部 obs_* 表名（旧版 + 新版），统一 DROP
+# 全部 obs_* 表名（当前新版 span 树模型 + 历史遗留旧表），统一 DROP
 ALL_OBS_TABLES = [
+    # ── 当前版本：通用 span 树模型（uuid span_id + parent_id 通用层级）──
+    "obs_tasks",
+    "obs_node_spans",
+    "obs_llm_spans",
+    "obs_mcp_spans",
+    # ── 历史遗留旧表（早期模型，确保一并清空）──
     "obs_spans",
     "obs_llm_metrics",
     "obs_llm_outputs",
     "obs_mcp_metrics",
     "obs_mcp_results",
-    "obs_tasks",
     "obs_node_metrics",
 ]
 

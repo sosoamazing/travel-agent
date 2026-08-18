@@ -225,7 +225,8 @@ def _extract_model(msg, fallback: str) -> str:
         return fallback
 
 
-def _make_tracked_llm(kwargs: Dict[str, Any], agent: str = "unknown") -> ChatOpenAI:
+def _make_tracked_llm(kwargs: Dict[str, Any], agent: str = "unknown",
+                      parse_json: bool = False) -> ChatOpenAI:
     """构造带 token 追踪的 ChatOpenAI：包装 ainvoke/astream 自动提取 token usage 并记录 agent 归属。"""
     base = ChatOpenAI(**kwargs)
 
@@ -242,11 +243,11 @@ def _make_tracked_llm(kwargs: Dict[str, Any], agent: str = "unknown") -> ChatOpe
                 timeout=LLM_TIMEOUT_SEC,
             )
         except asyncio.TimeoutError:
-            await end_llm(span_id, status="error",
-                          error=f"timeout: {LLM_TIMEOUT_SEC:g}s")
+            await end_llm(span_id, result="timeout",
+                          error_what=f"timeout: {LLM_TIMEOUT_SEC:g}s")
             raise
         except Exception as e:
-            await end_llm(span_id, status="error", error=str(e))
+            await end_llm(span_id, result="error", error_what=str(e))
             raise
         inp, out, cached = _extract_usage(msg)
         model = _extract_model(msg, kwargs.get("model", "unknown"))
@@ -257,7 +258,31 @@ def _make_tracked_llm(kwargs: Dict[str, Any], agent: str = "unknown") -> ChatOpe
                 out = max(1, int(len(str(content)) / 2.5))
         if inp or out:
             _token_tracker.add(model, inp, out, agent=agent, cached_input_tokens=cached)
-        await end_llm(span_id, status="ok",
+
+        # parse_json: 自动解析 JSON，失败用 flash 矫正（矫正发生在主 LLM span 还在栈上时，
+        # 矫正的 ainvoke 会以主 LLM span 为 parent，成为其子 span）。
+        if parse_json:
+            try:
+                from tools.json_utils import extract_json_block, fix_json_with_flash
+                cleaned = extract_json_block(content)
+                parsed = json.loads(cleaned)
+                parsed_obj = _AIMessageFromDict(parsed, model=model)
+                await end_llm(span_id, result="ok",
+                              input_tokens=inp, output_tokens=out, cached_tokens=cached,
+                              output=str(content))
+                return parsed_obj
+            except Exception as _jerr:
+                try:
+                    corrected = await fix_json_with_flash(content)
+                    await end_llm(span_id, result="ok",
+                                  input_tokens=inp, output_tokens=out, cached_tokens=cached,
+                                  output=str(content))
+                    return _AIMessageFromDict(corrected, model=model)
+                except Exception as _cfail:
+                    await end_llm(span_id, result="parse_error", error_what=str(_cfail))
+                    raise ValueError(f"{agent} JSON 解析+矫正均失败: {_cfail}") from _cfail
+
+        await end_llm(span_id, result="ok",
                       input_tokens=inp, output_tokens=out, cached_tokens=cached,
                       output=str(content))
         return msg
@@ -285,11 +310,11 @@ def _make_tracked_llm(kwargs: Dict[str, Any], agent: str = "unknown") -> ChatOpe
                         best_usage = (inp, out, cached)
                     yield chunk
         except asyncio.TimeoutError:
-            await end_llm(span_id, status="error",
-                          error=f"timeout: {LLM_STREAM_TIMEOUT_SEC:g}s")
+            await end_llm(span_id, result="timeout",
+                          error_what=f"timeout: {LLM_STREAM_TIMEOUT_SEC:g}s")
             raise
         except Exception as e:
-            await end_llm(span_id, status="error", error=str(e))
+            await end_llm(span_id, result="error", error_what=str(e))
             raise
         if full:
             if best_usage:
@@ -301,7 +326,7 @@ def _make_tracked_llm(kwargs: Dict[str, Any], agent: str = "unknown") -> ChatOpe
                 # 流式仍拿不到 usage 时，按字符估算（中英文混合 ~2.5 字/token）
                 out = max(1, int(len(all_text) / 2.5))
             _token_tracker.add(model, inp, out, agent=agent, cached_input_tokens=cached)
-            await end_llm(span_id, status="ok",
+            await end_llm(span_id, result="ok",
                           input_tokens=inp, output_tokens=out, cached_tokens=cached,
                           output=all_text)
 
@@ -327,9 +352,19 @@ class _LLM:
                  temperature: Optional[float] = None, streaming: bool = False,
                  tags: Optional[List[str]] = None,
                  max_tokens: Optional[int] = None,
-                 extra_body: Optional[Dict[str, Any]] = None):
+                 extra_body: Optional[Dict[str, Any]] = None,
+                 parse_json: bool = False):
+        """统一 LLM 客户端。
+
+        Args:
+            agent: 用途名（观测/模型覆盖用）。
+            model_type: 'pro' | 'flash'。
+            parse_json: True 时，ainvoke 返回后自动 `extract_json_block` + `json.loads`，
+                失败用 flash 矫正（矫正成为主 LLM 的子 span）。成功返回 dict，多次矫正失败抛 ValueError。
+        """
         self.agent = agent
         self.model_type = model_type
+        self.parse_json = parse_json
         if model_type == "flash":
             model = get_agent_model(agent, DS_FLASH_MODEL)
             temp = temperature if temperature is not None else DS_FLASH_TEMPERATURE
@@ -346,15 +381,15 @@ class _LLM:
         # 可选：输出 token 上限（DeepSeek 推理模型 max_tokens 含思维链 token）
         if max_tokens is not None:
             kwargs["max_tokens"] = max_tokens
-        # 可选：非标准 OpenAI 参数（如 DeepSeek 的 thinking 开关）必须走 extra_body，
+        # 可选：非标准 [OI] 参数（如 DeepSeek 的 thinking 开关）必须走 extra_body，
         # 直接放 kwargs/model_kwargs 会被 openai SDK 当未知顶层参数抛 TypeError。
         if extra_body:
             kwargs["extra_body"] = extra_body
         if streaming:
             kwargs["streaming"] = True
             kwargs["tags"] = tags or ["stream_to_user"]
-        # 底层 ChatOpenAI 的 ainvoke/astream 已被 _make_tracked_llm 包装（token 统计 + 观测落库）
-        self._llm = _make_tracked_llm(kwargs, agent=agent)
+        # 底层 Chat[OI] 的 ainvoke/astream 已被 _make_tracked_llm 包装（token 统计 + 观测落库）
+        self._llm = _make_tracked_llm(kwargs, agent=agent, parse_json=parse_json)
 
     def ainvoke(self, messages, **kw):
         return self._llm.ainvoke(messages, **kw)
@@ -402,3 +437,29 @@ async def _call_mcp_tool(tool_name: str, **params) -> str:
     except Exception as e:
         logger.warning(f"工具调用失败 {tool_name}: {e}")
         return json.dumps({"error": str(e)}, ensure_ascii=False)
+
+
+class _AIMessageFromDict:
+    """parse_json=True 时，把解析出的 dict 包装成轻量对象。
+
+    - .content: 原始 dict 的 JSON 字符串（调用方可 json.loads 继续用）
+    - .get(key): 直接取字段（更便捷）
+    - .data: 原始 dict
+    - .model: 记录模型名（供观测反查）
+    """
+    def __init__(self, data: dict, model: str = ""):
+        self.data = data
+        self.model = model
+        self.content = json.dumps(data, ensure_ascii=False)
+
+    def get(self, key, default=None):
+        return self.data.get(key, default)
+
+    def __getitem__(self, key):
+        return self.data[key]
+
+    def __contains__(self, key):
+        return key in self.data
+
+    def __str__(self):
+        return self.content

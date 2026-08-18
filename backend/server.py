@@ -145,14 +145,48 @@ async def _require_session_owner(session_id: str, user_id: str) -> None:
         raise HTTPException(status_code=403, detail="无权访问该会话")
 
 
-def _get_owned_task(task_id: str, user_id: str) -> TaskRecord:
-    """按 task_id 取任务记录并校验归属。"""
+def _get_owned_task(task_id: str, user_id: str, is_admin: bool = False) -> TaskRecord:
+    """按 task_id 取任务记录并校验访问权限。
+
+    放行规则（obs/trace 仅管理员可访问）：
+    - 调用方为管理员（is_admin=True）且任务归属用户在白名单（OBS_ADMIN_USER_IDS）内 → 放行；
+    - 否则要求任务归属用户与 user_id 一致。
+    """
+    from config.settings import OBS_ADMIN_USER_IDS
     record = get_service().tasks.get(task_id)
     if record is None:
         raise HTTPException(status_code=404, detail="task not found")
+    if is_admin and record.user_id in OBS_ADMIN_USER_IDS:
+        return record
     if record.user_id != user_id:
         raise HTTPException(status_code=403, detail="无权访问该任务")
     return record
+
+
+async def _authorize_obs_access(task_id: str, user_id: str, is_admin: bool) -> None:
+    """校验观测详情访问权限（仅管理员可访问，管理员可查看白名单内用户任务）。
+
+    与 _get_owned_task 的区别：内存 tasks（get_service().tasks）重启后会被清空，
+    而 obs 数据本身持久化在 obs_tasks 表。因此内存查不到时回退查 obs_tasks 表，
+    保证 backend 重启后管理员仍能查询历史任务的观测详情。
+    """
+    from config.settings import OBS_ADMIN_USER_IDS
+    # 1) 优先内存 TaskRecord（最新状态）
+    record = get_service().tasks.get(task_id)
+    if record is not None:
+        owner = record.user_id
+    else:
+        # 2) 回退 obs_tasks 表（backend 重启后内存清空，观测数据仍持久化在表里）
+        from agent_nodes._obs_storage import get_obs_storage
+        obs_row = await get_obs_storage().get_task(task_id)
+        if obs_row is None:
+            raise HTTPException(status_code=404, detail="task not found")
+        owner = obs_row.get("user_id") or ""
+    # 权限判断：管理员可看白名单内用户任务；否则仅本人
+    if is_admin and owner in OBS_ADMIN_USER_IDS:
+        return
+    if owner != user_id:
+        raise HTTPException(status_code=403, detail="无权访问该任务")
 
 
 # ──────────────────────────────────────────────────────────
@@ -258,10 +292,25 @@ async def chat(req: _ChatReq) -> Dict[str, Any]:
 
 
 @app.get("/internal/tasks/{task_id}")
-def get_task(task_id: str, user_id: str = Query("default_user")) -> Dict[str, Any]:
-    """轮询任务状态 + 进度 + 最终结果。"""
-    record = _get_owned_task(task_id, user_id)
-    return record.snapshot()
+async def get_task(task_id: str, user_id: str = Query("default_user")) -> Dict[str, Any]:
+    """轮询任务状态 + 进度 + 最终结果。
+
+    优先内存任务表（含实时进度）；内存缺失（如 backend 重启后）回退查 obs_tasks 表，
+    返回基于观测数据的最小任务视图。
+    """
+    record = get_service().tasks.get(task_id)
+    if record is not None:
+        # 内存有：校验本人归属（非 obs 接口，无管理员白名单豁免）
+        if record.user_id != user_id:
+            raise HTTPException(status_code=403, detail="无权访问该任务")
+        return record.snapshot()
+    # 内存缺失：回退查 DB，并校验归属
+    data = await get_service().get_task_from_db(task_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail="task not found")
+    if (data.get("user_id") or "") != user_id:
+        raise HTTPException(status_code=403, detail="无权访问该任务")
+    return data
 
 
 @app.post("/internal/tasks/{task_id}/resume")
@@ -305,10 +354,22 @@ async def stream_task(task_id: str, user_id: str = Query("default_user")) -> Str
 # ──────────────────────────────────────────────────────────
 
 @app.get("/internal/obs/{task_id}")
-async def obs(task_id: str, user_id: str = Query("default_user")) -> Dict[str, Any]:
-    """查询某业务 task 对应的观测追踪详情。"""
-    _get_owned_task(task_id, user_id)
+async def obs(task_id: str, user_id: str = Query("default_user"),
+              is_admin: bool = Query(False)) -> Dict[str, Any]:
+    """查询某业务 task 对应的观测追踪详情（仅管理员可访问）。"""
+    await _authorize_obs_access(task_id, user_id, is_admin)
     data = await get_service().get_obs(task_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail="observation not found")
+    return data
+
+
+@app.get("/internal/obs/{task_id}/trace")
+async def obs_trace(task_id: str, user_id: str = Query("default_user"),
+                    is_admin: bool = Query(False)) -> Dict[str, Any]:
+    """查询某业务 task 对应的完整 span 树 trace（格式 A 点分路径 + 格式 B 大 JSON；仅管理员可访问）。"""
+    await _authorize_obs_access(task_id, user_id, is_admin)
+    data = await get_service().get_obs_trace(task_id)
     if data is None:
         raise HTTPException(status_code=404, detail="observation not found")
     return data
@@ -362,4 +423,6 @@ if __name__ == "__main__":
     import uvicorn
 
     # Windows 需要 loop="none" 以使用本文件顶层设置的 SelectorEventLoop 策略
-    uvicorn.run("server:app", host="0.0.0.0", port=8001, loop="none", reload=False)
+    # 仅绑定 127.0.0.1（本机）：backend 只允许本机 gateway 访问，避免外部直连 8001
+    # 伪造 user_id / is_admin 参数绕过网关 JWT 鉴权（两层鉴权依赖“backend 不可外部直达”）。
+    uvicorn.run("server:app", host="127.0.0.1", port=8001, loop="none", reload=False)

@@ -68,10 +68,240 @@ function errTone(type) {
 
 function statusInfo(status) {
   const s = String(status || '').toLowerCase()
-  if (s === 'succeeded' || s === 'success') return ['成功', 'st-ok']
+  if (s === 'succeeded' || s === 'success' || s === 'ok' || s === 'degraded') return ['成功', 'st-ok']
   if (s === 'failed' || s === 'failure' || s === 'error') return ['失败', 'st-err']
   if (s === 'running' || s === 'processing' || s === 'pending') return ['进行中', 'st-run']
   return [status || '未知', 'st-idle']
+}
+
+// 长文本阈值（字符数）与最大折叠显示长度
+const LONG_TEXT_THRESHOLD = 200
+const LONG_TEXT_SNIPPET = 180
+
+// 递归渲染 trace span 树：树形缩进 + 展开/折叠 + 错误高亮 + 耗时条
+// - depth: 树深度，用于缩进
+// - collapsed: Set<span_id>，被折叠的节点其子树不渲染
+// - onToggle: (span_id) => void，切换折叠态
+// - totalMs: 整个 trace 的最大耗时，用于计算耗时条相对宽度
+function TraceTree({ trace, depth = 0, collapsed, onToggle, totalMs = 0 }) {
+  if (!trace || trace.length === 0) return null
+  return (
+    <div className="trace-tree" role="tree">
+      {trace.map((node) => {
+        const spanId = node.span_id || node.path
+        const hasChildren = !!(node.children && node.children.length > 0)
+        const isCollapsed = collapsed?.has(spanId)
+        const leafName = (node.path || '').split('.').pop() || node.path || '—'
+        const isError = node.result_kind === 'error' || node.result_kind === 'failed'
+        const duration = Number(node.duration_ms) || 0
+        const durationPct = totalMs > 0 ? Math.min(100, (duration / totalMs) * 100) : 0
+        const childCount = hasChildren ? node.children.length : 0
+        return (
+          <div
+            className={`trace-node depth-${depth}${isError ? ' is-error' : ''}${isCollapsed ? ' is-collapsed' : ''
+              }`}
+            key={spanId}
+            role="treeitem"
+            aria-expanded={!isCollapsed}
+          >
+            <div className="trace-node-head">
+              {hasChildren ? (
+                <button
+                  type="button"
+                  className={`trace-toggle${isCollapsed ? ' collapsed' : ''}`}
+                  onClick={() => onToggle && onToggle(spanId)}
+                  aria-label={isCollapsed ? '展开子节点' : '折叠子节点'}
+                />
+              ) : (
+                <span className="trace-toggle-placeholder" aria-hidden="true" />
+              )}
+              <span className="trace-path" title={node.path}>{leafName}</span>
+              <span className={`trace-kind trace-kind-${node.span_type}`}>{node.span_type}</span>
+              {node.result_kind && node.result_kind !== 'ok' && (
+                <span
+                  className={`trace-result trace-result-${node.result_kind}`}
+                  title={node.result || ''}
+                >
+                  {node.result || node.result_kind}
+                </span>
+              )}
+              {isCollapsed && childCount > 0 && (
+                <span className="trace-child-count" title={`${childCount} 个子节点`}>
+                  {childCount} 子
+                </span>
+              )}
+              <span className="trace-ms">{fmtMs(duration)}</span>
+            </div>
+            {duration > 0 && (
+              <div className="trace-duration-bar" aria-hidden="true">
+                <div
+                  className={`trace-duration-fill${isError ? ' err' : ''}`}
+                  style={{ width: `${Math.max(2, durationPct)}%` }}
+                />
+              </div>
+            )}
+            {node.input_tokens != null && (
+              <div className="trace-meta">
+                <span className="trace-meta-item">
+                  tokens <b>↑{fmtNum(node.input_tokens)}</b> ↓{fmtNum(node.output_tokens)}
+                </span>
+                {node.cached_tokens ? (
+                  <span className="trace-meta-item trace-meta-cached">
+                    cached {fmtNum(node.cached_tokens)}
+                  </span>
+                ) : null}
+                {node.agent ? <span className="trace-meta-item">agent=<b>{node.agent}</b></span> : null}
+              </div>
+            )}
+            {node.server && (
+              <div className="trace-meta">
+                <span className="trace-meta-item">server={node.server}</span>
+                <span className="trace-meta-item">retries={node.retries ?? 0}</span>
+              </div>
+            )}
+            {node.output != null && (
+              <CollapsibleText label="output" text={node.output} isError={isError} />
+            )}
+            {hasChildren && !isCollapsed && (
+              <TraceTree
+                trace={node.children}
+                depth={depth + 1}
+                collapsed={collapsed}
+                onToggle={onToggle}
+                totalMs={totalMs}
+              />
+            )}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+// 长文本：超过阈值默认折叠，点击展开/收起
+function CollapsibleText({ label, text, isError = false }) {
+  const str = String(text ?? '')
+  const [expanded, setExpanded] = useState(false)
+  if (!str) return null
+  const isLong = str.length > LONG_TEXT_THRESHOLD
+  const preClass = `trace-pre${isError ? ' trace-pre-err' : ''}`
+  if (!isLong) {
+    return (
+      <div className="trace-text">
+        <span className="trace-text-label">{label}:</span>
+        <pre className={preClass}>{str}</pre>
+      </div>
+    )
+  }
+  return (
+    <div className="trace-text">
+      <span className="trace-text-label">{label}:</span>
+      <button
+        type="button"
+        className="text-toggle"
+        onClick={() => setExpanded((e) => !e)}
+      >
+        {expanded ? '收起' : `展开（${str.length} 字）`}
+      </button>
+      {expanded && <pre className={preClass}>{str}</pre>}
+    </div>
+  )
+}
+
+// 递归收集所有 span 的 duration_ms，取最大值作为耗时条 100% 基准
+function maxDurationOf(traceList) {
+  let max = 0
+  const walk = (list) => {
+    if (!Array.isArray(list)) return
+    for (const n of list) {
+      const d = Number(n?.duration_ms) || 0
+      if (d > max) max = d
+      if (Array.isArray(n?.children)) walk(n.children)
+    }
+  }
+  walk(traceList)
+  return max
+}
+
+// 最近任务展开后的大 JSON 视图：顶部 summary + 完整 span 树 + 原始 JSON
+function TaskTraceView({ trace, collapsedText, setCollapsedText }) {
+  const summary = trace?.summary || {}
+  const [collapsedNodes, setCollapsedNodes] = useState(() => new Set())
+  const totalMs = maxDurationOf(trace?.trace || [])
+
+  function toggleNode(spanId) {
+    setCollapsedNodes((prev) => {
+      const next = new Set(prev)
+      if (next.has(spanId)) next.delete(spanId)
+      else next.add(spanId)
+      return next
+    })
+  }
+
+  function expandAll() {
+    setCollapsedNodes(new Set())
+  }
+
+  function collapseAll() {
+    const all = new Set()
+    const walk = (list) => {
+      if (!Array.isArray(list)) return
+      for (const n of list) {
+        if (n?.children?.length > 0) {
+          all.add(n.span_id || n.path)
+          walk(n.children)
+        }
+      }
+    }
+    walk(trace?.trace || [])
+    setCollapsedNodes(all)
+  }
+
+  const fullText = JSON.stringify(trace, null, 2)
+  const jsonOpen = collapsedText.has(fullText)
+  return (
+    <div className="trace-view">
+      <div className="trace-summary">
+        <span className="agent-sub-title">
+          观测详情：节点 {summary.node_count ?? '—'} · LLM {summary.llm_call_count ?? '—'} · 工具{' '}
+          {summary.tool_call_count ?? '—'} · tokens {fmtNum(summary.total_tokens)} · 耗时{' '}
+          {fmtMs(summary.wall_clock_ms)} · 状态 {statusInfo(summary.result_kind || '')[0]}
+        </span>
+        <span className="trace-view-actions">
+          <button type="button" className="text-toggle" onClick={expandAll}>
+            全部展开
+          </button>
+          <button type="button" className="text-toggle" onClick={collapseAll}>
+            全部折叠
+          </button>
+        </span>
+      </div>
+      <div className="trace-tree-wrap">
+        <TraceTree
+          trace={trace?.trace || []}
+          depth={0}
+          collapsed={collapsedNodes}
+          onToggle={toggleNode}
+          totalMs={totalMs}
+        />
+      </div>
+      <div className="trace-raw">
+        <button
+          type="button"
+          className="text-toggle"
+          onClick={() => {
+            const next = new Set(collapsedText)
+            if (jsonOpen) next.delete(fullText)
+            else next.add(fullText)
+            setCollapsedText(next)
+          }}
+        >
+          {jsonOpen ? '收起原始 JSON' : '查看原始 JSON'}
+        </button>
+        {jsonOpen && <pre className="trace-pre trace-pre-raw">{fullText}</pre>}
+      </div>
+    </div>
+  )
 }
 
 export default function AdminPage({ onLogout }) {
@@ -96,6 +326,12 @@ export default function AdminPage({ onLogout }) {
   const [creating, setCreating] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState('')
   const [expandedNodes, setExpandedNodes] = useState(() => new Set())
+  // 最近任务：已展开的任务 id 集合 + trace 数据缓存 + 加载态
+  const [expandedTasks, setExpandedTasks] = useState(() => new Set())
+  const [traceCache, setTraceCache] = useState({})
+  const [traceLoading, setTraceLoading] = useState({})
+  // 展开的 JSON 文本：用于长内容折叠（JSON.stringify 后的键）
+  const [collapsedText, setCollapsedText] = useState(() => new Set())
 
   const loadReport = useCallback(async (ver = '') => {
     setReportLoading(true)
@@ -183,17 +419,18 @@ export default function AdminPage({ onLogout }) {
   /* ── 指标卡 ─────────────────────────── */
   const metrics = report
     ? [
-        { label: '任务总数', value: fmtNum(report.task_count), cls: 'm-blue' },
-        { label: '成功率', value: fmtRate(report.success_rate), cls: 'm-green' },
-        { label: '失败任务', value: fmtNum(report.error_count), cls: 'm-red' },
-        { label: '意图识别', value: fmtRate(report.intent_recognition?.success_rate), cls: 'm-violet' },
-        { label: '总 Token', value: fmtNum(report.tokens?.total), cls: 'm-violet' },
-        { label: '平均耗时', value: fmtMs(report.duration?.mean), cls: 'm-cyan' },
-        { label: '端到端耗时', value: fmtMs(report.client_duration?.mean), cls: 'm-cyan' },
-        { label: 'LLM 调用', value: fmtNum(report.llm_call_count), cls: 'm-orange' },
-        { label: '工具调用', value: fmtNum(report.tool_call_count), cls: 'm-teal' },
-        { label: '缓存命中率', value: fmtPct(report.tokens?.cache_hit_rate), cls: 'm-slate' },
-      ]
+      { label: '任务总数', value: fmtNum(report.task_count), cls: 'm-blue' },
+      { label: '成功率', value: fmtRate(report.success_rate), cls: 'm-green' },
+      { label: '失败任务', value: fmtNum(report.error_count), cls: 'm-red' },
+      { label: '运行中任务', value: fmtNum(report.running_count), cls: 'm-cyan' },
+      { label: '意图识别', value: fmtRate(report.intent_recognition?.success_rate), cls: 'm-violet' },
+      { label: '总 Token', value: fmtNum(report.tokens?.total), cls: 'm-violet' },
+      { label: '平均耗时', value: fmtMs(report.duration?.mean), cls: 'm-cyan' },
+      { label: '端到端耗时', value: fmtMs(report.client_duration?.mean), cls: 'm-cyan' },
+      { label: 'LLM 调用', value: fmtNum(report.llm_call_count), cls: 'm-orange' },
+      { label: '工具调用', value: fmtNum(report.tool_call_count), cls: 'm-teal' },
+      { label: '缓存命中率', value: fmtPct(report.tokens?.cache_hit_rate), cls: 'm-slate' },
+    ]
     : []
 
   /* ── 明细渲染 ───────────────────────── */
@@ -556,6 +793,33 @@ export default function AdminPage({ onLogout }) {
     )
   }
 
+  async function toggleTaskTrace(taskId) {
+    const isOpen = expandedTasks.has(taskId)
+    const next = new Set(expandedTasks)
+    if (isOpen) {
+      next.delete(taskId)
+      setExpandedTasks(next)
+      return
+    }
+    // 展开：先标记，再按需加载 trace
+    next.add(taskId)
+    setExpandedTasks(next)
+    if (traceCache[taskId]) return // 已缓存
+    setTraceLoading((s) => ({ ...s, [taskId]: true }))
+    try {
+      const trace = await api.adminTrace(taskId)
+      setTraceCache((s) => ({ ...s, [taskId]: trace }))
+    } catch (err) {
+      setTraceCache((s) => ({ ...s, [taskId]: null }))
+    } finally {
+      setTraceLoading((s) => {
+        const n = { ...s }
+        delete n[taskId]
+        return n
+      })
+    }
+  }
+
   function renderTasks() {
     if (tasks.length === 0) return <div className="empty-hint">暂无任务记录</div>
     return (
@@ -563,6 +827,7 @@ export default function AdminPage({ onLogout }) {
         <table className="admin-table">
           <thead>
             <tr>
+              <th></th>
               <th>任务 ID</th>
               <th>用户</th>
               <th>查询</th>
@@ -574,19 +839,52 @@ export default function AdminPage({ onLogout }) {
           <tbody>
             {tasks.map((t) => {
               const [statusText, statusCls] = statusInfo(t.status)
+              const isOpen = expandedTasks.has(t.task_id)
+              const trace = traceCache[t.task_id]
+              const loading = traceLoading[t.task_id]
               return (
-                <tr key={t.task_id}>
-                  <td className="cell-id">{t.task_id}</td>
-                  <td>{t.user_id || '—'}</td>
-                  <td className="cell-query" title={t.user_query}>
-                    {shortQuery(t.user_query)}
-                  </td>
-                  <td>{fmtTime(t.start_ts)}</td>
-                  <td>{fmtMs(t.duration_ms)}</td>
-                  <td>
-                    <span className={`status-badge ${statusCls}`}>{statusText}</span>
-                  </td>
-                </tr>
+                <Fragment key={t.task_id}>
+                  <tr className={isOpen ? 'node-row-open' : ''}>
+                    <td>
+                      <button
+                        type="button"
+                        className={`node-expand${isOpen ? ' open' : ''}`}
+                        onClick={() => toggleTaskTrace(t.task_id)}
+                        aria-expanded={isOpen}
+                        aria-label={`展开 ${t.task_id} 的观测详情`}
+                      >
+                        <span className="node-expand-icon">▸</span>
+                      </button>
+                    </td>
+                    <td className="cell-id">{t.task_id}</td>
+                    <td>{t.user_id || '—'}</td>
+                    <td className="cell-query" title={t.user_query}>
+                      {shortQuery(t.user_query)}
+                    </td>
+                    <td>{fmtTime(t.start_ts)}</td>
+                    <td>{fmtMs(t.duration_ms)}</td>
+                    <td>
+                      <span className={`status-badge ${statusCls}`}>{statusText}</span>
+                    </td>
+                  </tr>
+                  {isOpen && (
+                    <tr className="node-sub-row">
+                      <td className="node-sub-cell" colSpan={7}>
+                        {loading ? (
+                          <div className="agent-sub-title">正在加载观测详情…</div>
+                        ) : trace ? (
+                          <TaskTraceView
+                            trace={trace}
+                            collapsedText={collapsedText}
+                            setCollapsedText={setCollapsedText}
+                          />
+                        ) : (
+                          <div className="agent-sub-title">观测详情加载失败或任务无观测数据</div>
+                        )}
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
               )
             })}
           </tbody>

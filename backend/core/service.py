@@ -369,6 +369,33 @@ class TravelService:
         record = self.tasks.get(task_id)
         return record.snapshot() if record else None
 
+    async def get_task_from_db(self, task_id: str) -> Optional[Dict[str, Any]]:
+        """内存任务表缺失时回退查数据库（obs_tasks），拼出最小任务视图。
+
+        内存 self.tasks 在 backend 重启后清空，但观测数据持久化在 obs_tasks 表。
+        业务 status 由 result_kind 推导：ok→succeeded / error→failed / running→running。
+        """
+        from agent_nodes._obs_storage import get_obs_storage
+        row = await get_obs_storage().get_task(task_id)
+        if row is None:
+            return None
+        kind = row.get("result_kind") or ""
+        status_map = {"ok": "succeeded", "error": "failed", "running": "running"}
+        return {
+            "task_id": task_id,
+            "status": status_map.get(kind, kind or "pending"),
+            "current_node": None,
+            "progress_message": None,
+            "result": None,  # 业务结果 JSON 不落 obs_tasks；如需完整结果需查 checkpoint
+            "error": row.get("error_what"),
+            "created_at": None,
+            "started_at": row.get("start_ts"),
+            "finished_at": row.get("end_ts"),
+            "user_id": row.get("user_id"),
+            "session_id": row.get("session_id"),
+            "user_query": row.get("user_query"),
+        }
+
     async def resume_task(self, task_id: str) -> str:
         """断点续跑：以同一 task_id（=thread_id）从最近 checkpoint 继续执行。
 
@@ -551,12 +578,28 @@ class TravelService:
     # ── 观测 ──────────────────────────────────────────────
 
     async def get_obs(self, task_id: str) -> Optional[Dict[str, Any]]:
-        """查询某业务 task 对应的观测追踪详情（返回 None 表示任务或观测不存在）。"""
-        record = self.tasks.get(task_id)
-        if record is None or not record.obs_task_id:
+        """查询某业务 task 对应的观测追踪详情（返回 None 表示任务或观测不存在）。
+
+        直接查 obs_tasks 表（build_task_json 读表），不依赖内存 TaskRecord——backend
+        重启后内存清空，但观测数据仍持久化，保证历史任务可查。
+        """
+        from agent_nodes._obs_storage import get_obs_storage
+        if await get_obs_storage().get_task(task_id) is None:
             return None
         from agent_nodes._observability import build_task_json
-        return await build_task_json(record.obs_task_id)
+        return await build_task_json(task_id)
+
+    async def get_obs_trace(self, task_id: str) -> Optional[Dict[str, Any]]:
+        """查询某业务 task 对应的完整 span 树 trace（格式 A 点分路径 + 格式 B 大 JSON）。
+
+        直接查 obs_tasks 表（build_trace_json 读表），不依赖内存 TaskRecord——backend
+        重启后内存清空，但观测数据仍持久化，保证历史任务可查。
+        """
+        from agent_nodes._obs_storage import get_obs_storage
+        if await get_obs_storage().get_task(task_id) is None:
+            return None
+        from agent_nodes._observability import build_trace_json
+        return await build_trace_json(task_id)
 
     # ── 健康检查 ──────────────────────────────────────────
 

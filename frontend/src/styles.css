@@ -315,11 +315,11 @@ button {
   word-break: break-word;
 }
 
-.md > :first-child {
+.md> :first-child {
   margin-top: 0;
 }
 
-.md > :last-child {
+.md> :last-child {
   margin-bottom: 0;
 }
 
@@ -775,14 +775,37 @@ button {
   background: #d3d8de;
 }
 
-.metric-card.m-blue::before { background: #165dff; }
-.metric-card.m-green::before { background: #00b42a; }
-.metric-card.m-red::before { background: #f53f3f; }
-.metric-card.m-violet::before { background: #722ed1; }
-.metric-card.m-cyan::before { background: #0fa3a3; }
-.metric-card.m-orange::before { background: #ff7d00; }
-.metric-card.m-teal::before { background: #0aa68c; }
-.metric-card.m-slate::before { background: #4e5969; }
+.metric-card.m-blue::before {
+  background: #165dff;
+}
+
+.metric-card.m-green::before {
+  background: #00b42a;
+}
+
+.metric-card.m-red::before {
+  background: #f53f3f;
+}
+
+.metric-card.m-violet::before {
+  background: #722ed1;
+}
+
+.metric-card.m-cyan::before {
+  background: #0fa3a3;
+}
+
+.metric-card.m-orange::before {
+  background: #ff7d00;
+}
+
+.metric-card.m-teal::before {
+  background: #0aa68c;
+}
+
+.metric-card.m-slate::before {
+  background: #4e5969;
+}
 
 .metric-label {
   font-size: 12px;
@@ -796,14 +819,37 @@ button {
   font-variant-numeric: tabular-nums;
 }
 
-.metric-card.m-blue .metric-value { color: #165dff; }
-.metric-card.m-green .metric-value { color: #00b42a; }
-.metric-card.m-red .metric-value { color: #f53f3f; }
-.metric-card.m-violet .metric-value { color: #722ed1; }
-.metric-card.m-cyan .metric-value { color: #0fa3a3; }
-.metric-card.m-orange .metric-value { color: #ff7d00; }
-.metric-card.m-teal .metric-value { color: #0aa68c; }
-.metric-card.m-slate .metric-value { color: #4e5969; }
+.metric-card.m-blue .metric-value {
+  color: #165dff;
+}
+
+.metric-card.m-green .metric-value {
+  color: #00b42a;
+}
+
+.metric-card.m-red .metric-value {
+  color: #f53f3f;
+}
+
+.metric-card.m-violet .metric-value {
+  color: #722ed1;
+}
+
+.metric-card.m-cyan .metric-value {
+  color: #0fa3a3;
+}
+
+.metric-card.m-orange .metric-value {
+  color: #ff7d00;
+}
+
+.metric-card.m-teal .metric-value {
+  color: #0aa68c;
+}
+
+.metric-card.m-slate .metric-value {
+  color: #4e5969;
+}
 
 /* 版本筛选 */
 .admin-version-filter {
@@ -1364,4 +1410,453 @@ button {
   .admin-user {
     flex-wrap: wrap;
   }
+}
+
+/* ── 最近任务 · 观测详情（trace 大 JSON） ─────────────── */
+.trace-view {
+  max-width: 100%;
+}
+
+.trace-summary {
+  margin-bottom: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.trace-view-actions {
+  display: inline-flex;
+  gap: 6px;
+}
+
+.trace-tree-wrap {
+  max-width: 100%;
+  overflow-x: auto;
+  border: 1px solid #e5e6eb;
+  border-radius: 8px;
+  background: #fff;
+  padding: 8px 12px;
+}
+
+.trace-tree {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* 每个 span 节点容器：按深度缩进 + 左侧树连接线 */
+.trace-node {
+  position: relative;
+  padding: 4px 4px 4px 20px;
+  border-radius: 4px;
+  transition: background 0.15s ease;
+}
+
+.trace-node:hover {
+  background: #f7f8fa;
+}
+
+/* 递归缩进：每个 depth 增加 16px 左内边距 */
+.trace-node.depth-0 {
+  padding-left: 12px;
+}
+
+.trace-node.depth-1 {
+  padding-left: 28px;
+}
+
+.trace-node.depth-2 {
+  padding-left: 44px;
+}
+
+.trace-node.depth-3 {
+  padding-left: 60px;
+}
+
+.trace-node.depth-4 {
+  padding-left: 76px;
+}
+
+.trace-node.depth-5 {
+  padding-left: 92px;
+}
+
+.trace-node.depth-6 {
+  padding-left: 108px;
+}
+
+.trace-node.depth-7 {
+  padding-left: 124px;
+}
+
+.trace-node.depth-8 {
+  padding-left: 140px;
+}
+
+/* 树连接线：垂直引导线 */
+.trace-node::before {
+  content: '';
+  position: absolute;
+  left: 8px;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: #e5e6eb;
+}
+
+.trace-node.depth-0::before {
+  left: 4px;
+}
+
+.trace-node.depth-1::before {
+  left: 20px;
+}
+
+.trace-node.depth-2::before {
+  left: 36px;
+}
+
+.trace-node.depth-3::before {
+  left: 52px;
+}
+
+.trace-node.depth-4::before {
+  left: 68px;
+}
+
+.trace-node.depth-5::before {
+  left: 84px;
+}
+
+.trace-node.depth-6::before {
+  left: 100px;
+}
+
+.trace-node.depth-7::before {
+  left: 116px;
+}
+
+.trace-node.depth-8::before {
+  left: 132px;
+}
+
+/* 水平连接线（从垂直线到节点头部） */
+.trace-node::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 13px;
+  height: 1px;
+  background: #e5e6eb;
+}
+
+.trace-node.depth-0::after {
+  left: 4px;
+  width: 8px;
+}
+
+.trace-node.depth-1::after {
+  left: 20px;
+  width: 8px;
+}
+
+.trace-node.depth-2::after {
+  left: 36px;
+  width: 8px;
+}
+
+.trace-node.depth-3::after {
+  left: 52px;
+  width: 8px;
+}
+
+.trace-node.depth-4::after {
+  left: 68px;
+  width: 8px;
+}
+
+.trace-node.depth-5::after {
+  left: 84px;
+  width: 8px;
+}
+
+.trace-node.depth-6::after {
+  left: 100px;
+  width: 8px;
+}
+
+.trace-node.depth-7::after {
+  left: 116px;
+  width: 8px;
+}
+
+.trace-node.depth-8::after {
+  left: 132px;
+  width: 8px;
+}
+
+/* 错误节点：左侧红色高亮条 + 浅红背景 */
+.trace-node.is-error {
+  background: #fff5f5;
+  border-radius: 4px;
+}
+
+.trace-node.is-error::after {
+  background: #f53f3f;
+  height: 2px;
+  top: 12px;
+}
+
+.trace-node.is-error:hover {
+  background: #ffece8;
+}
+
+/* 节点头部行 */
+.trace-node-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+/* 展开/折叠按钮（chevron） */
+.trace-toggle,
+.trace-toggle-placeholder {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+
+.trace-toggle {
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  padding: 0;
+  position: relative;
+  transition: transform 0.15s ease;
+}
+
+.trace-toggle::before {
+  content: '▾';
+  font-size: 10px;
+  color: #86909c;
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%) rotate(0deg);
+  transition: transform 0.15s ease;
+}
+
+.trace-toggle.collapsed::before {
+  transform: translate(-50%, -50%) rotate(-90deg);
+}
+
+.trace-toggle:hover::before {
+  color: #165dff;
+}
+
+/* 节点名（叶子） */
+.trace-path {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+  color: #1d2129;
+  font-weight: 600;
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.trace-node.is-error .trace-path {
+  color: #f53f3f;
+}
+
+/* 节点类型徽章 */
+.trace-kind {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 4px;
+  color: #fff;
+  letter-spacing: 0.3px;
+}
+
+.trace-kind-node {
+  background: #165dff;
+}
+
+.trace-kind-llm {
+  background: #722ed1;
+}
+
+.trace-kind-mcp {
+  background: #0fa3a3;
+}
+
+.trace-kind-tool {
+  background: #fa8c16;
+}
+
+/* 结果徽章 */
+.trace-result {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: #f2f3f5;
+  color: #4e5969;
+}
+
+.trace-result-error {
+  background: #ffece8;
+  color: #f53f3f;
+  border: 1px solid #ffccc7;
+}
+
+.trace-result-failed {
+  background: #ffece8;
+  color: #f53f3f;
+  border: 1px solid #ffccc7;
+}
+
+.trace-result-running {
+  background: #e8f3ff;
+  color: #165dff;
+}
+
+.trace-result-unknown {
+  background: #f2f3f5;
+  color: #86909c;
+}
+
+/* 子节点数量徽章（折叠态显示） */
+.trace-child-count {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 0 5px;
+  border-radius: 10px;
+  background: #eef2ff;
+  color: #165dff;
+  line-height: 16px;
+}
+
+/* 耗时 */
+.trace-ms {
+  color: #86909c;
+  font-size: 11px;
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+
+.trace-node.is-error .trace-ms {
+  color: #cf1322;
+  font-weight: 600;
+}
+
+/* 耗时条：在节点头下方显示相对耗时 */
+.trace-duration-bar {
+  margin: 2px 0 2px 20px;
+  height: 3px;
+  background: #f2f3f5;
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.trace-duration-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #4080ff, #165dff);
+  border-radius: 2px;
+  transition: width 0.3s ease;
+  min-width: 2px;
+}
+
+.trace-duration-fill.err {
+  background: linear-gradient(90deg, #ff7875, #f53f3f);
+}
+
+.trace-node.is-error .trace-duration-bar {
+  background: #ffe8e6;
+}
+
+/* 元信息行 */
+.trace-meta {
+  font-size: 11px;
+  color: #4e5969;
+  margin: 2px 0 2px 20px;
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.trace-meta-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.trace-meta-cached {
+  color: #fa8c16;
+}
+
+/* 输出文本区 */
+.trace-text {
+  margin: 4px 0 2px 20px;
+  font-size: 11px;
+}
+
+.trace-text-label {
+  font-weight: 600;
+  color: #4e5969;
+  margin-right: 6px;
+}
+
+.trace-pre {
+  margin: 4px 0;
+  padding: 8px 10px;
+  background: #f7f9fc;
+  border: 1px solid #e5e6eb;
+  border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 11.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #1f2329;
+}
+
+.trace-pre-err {
+  background: #fff2f0;
+  border-color: #ffccc7;
+  color: #cf1322;
+}
+
+.trace-pre-raw {
+  max-height: 480px;
+  overflow: auto;
+}
+
+.text-toggle {
+  border: 1px solid #165dff;
+  background: #eef2ff;
+  color: #165dff;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 6px;
+  padding: 2px 10px;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.text-toggle:hover {
+  background: #e0e8ff;
+}
+
+.trace-raw {
+  margin-top: 10px;
 }

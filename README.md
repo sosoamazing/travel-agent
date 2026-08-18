@@ -223,7 +223,8 @@ SUPERADMIN_PASSWORD=your-strong-admin-password
 
 ```bash
 # 1) backend 内部服务（业务逻辑 + LangGraph 工作流 + 观测写入），端口 8001
-uvicorn server:app --host 0.0.0.0 --port 8001 --app-dir backend
+#    仅绑定 127.0.0.1（本机），只允许同机 gateway 访问，避免外部直连伪造 user_id 绕过网关 JWT
+uvicorn server:app --host 127.0.0.1 --port 8001 --app-dir backend
 
 # 2) gateway 对外网关（JWT 鉴权 + 转发到 backend），端口 8000
 uvicorn gateway.main:app --host 0.0.0.0 --port 8000
