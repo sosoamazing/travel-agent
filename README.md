@@ -10,13 +10,10 @@
 - [系统要求](#系统要求)
 - [安装部署](#安装部署)
 - [使用指南](#使用指南)
-- [安全说明](#安全说明)
 - [API 接口](#api-接口)
 - [数据库与观测](#数据库与观测)
 - [项目结构](#项目结构)
 - [开发说明](#开发说明)
-- [故障排查](#故障排查)
-- [贡献指南](#贡献指南)
 
 ---
 
@@ -176,13 +173,10 @@ PG_USER=travel_agent
 PG_PASSWORD=travel_agent
 PG_DATABASE=travel_agent
 
-# 安全（务必修改，否则有风险，见「安全说明」）
 JWT_SECRET=your-strong-random-secret
 SUPERADMIN_USERNAME=admin
 SUPERADMIN_PASSWORD=your-strong-admin-password
 ```
-
-> ⚠️ `.env` 已被 `.gitignore` 忽略，**不要提交真实密钥到版本库**。
 
 ### 5. 配置 MCP 服务器
 
@@ -278,19 +272,6 @@ npm run dev   # 默认 http://localhost:5173，通过 VITE_API_BASE_URL 指向 g
 
 ---
 
-## 🔒 安全说明
-
-> ⚠️ 本项目用于本地 / 演示用途，部署到公网前务必处理以下安全项：
-
-1. **密钥**：`OPENAI_API_KEY` / `DASHSCOPE_API_KEY` 只放 `.env`（已 gitignore），**绝不提交到版本库**。
-2. **JWT_SECRET**：默认值 `travel-agent-dev-secret-change-me` 仅用于开发，生产必须用强随机串。
-3. **超级管理员**：默认 `admin / admin123456` 会自动创建，生产必须立即修改。
-4. **CORS**：gateway 默认 `allow_origins=["*"]`，生产应限定为前端域名。
-5. **backend 信任边界**：`/internal/*` 接口不做 JWT 鉴权（由 gateway 负责），依赖调用方传入 `user_id` 做归属校验。**backend 必须部署在内网、不对公网暴露**。
-6. **前端 token 存储**：JWT 存于 localStorage，存在 XSS 泄露风险；高安全场景建议改为 HttpOnly Cookie。
-
----
-
 ## 📡 API 接口
 
 ### gateway（对外，需 JWT）
@@ -354,7 +335,7 @@ travel-agent/travel-agent/
 ├── frontend/                   # React 前端（Vite + JWT + SSE）
 │   └── src/
 ├── docs/                       # 设计文档
-├── .env                        # 环境变量（JWT / PG / 模型密钥，已 gitignore）
+├── .env                        # 环境变量（JWT / PG / 模型密钥）
 ├── docker-compose.yml          # PostgreSQL (pgvector) 服务
 └── start_services.ps1          # Windows 一键启动脚本
 ```
@@ -378,43 +359,6 @@ travel-agent/travel-agent/
 1. 在 `backend/agent_nodes/` 创建节点文件
 2. 在 `backend/graph/workflow.py` 注册节点与边
 3. 在 `backend/graph/state.py` 添加必要的状态字段
-
----
-
-## 🐛 故障排查
-
-### 1. 模块导入错误
-```bash
-cd backend
-pip install -r requirements.txt
-```
-
-### 2. MCP 工具调用失败
-1. 检查 `config/servers_config.json` 的 MCP URL 是否真实可用
-2. 查看 backend 日志中的 MCP 连接/调用信息
-3. 检查 MCP 令牌桶限速是否触发（`MCP_RATE_LIMIT_MAX`）
-
-### 3. gateway 转发失败
-- 确认 backend（:8001）已启动
-- 检查 gateway 日志中的转发错误 / 超时
-
-### 4. API Key 错误
-1. 检查 `.env` 中的 Key 是否正确
-2. 确认账户有足够额度
-
-### 5. 断点续跑不可用
-- 确认已安装 `langgraph-checkpoint-postgres` 且 PostgreSQL 可连
-- 未启用时服务降级为无 checkpointer 模式（仅失去续跑能力）
-
----
-
-## 🤝 贡献指南
-
-1. Fork 本项目
-2. 创建特性分支（`git checkout -b feature/AmazingFeature`）
-3. 提交更改（`git commit -m 'Add some AmazingFeature'`）
-4. 推送到分支（`git push origin feature/AmazingFeature`）
-5. 开启 Pull Request
 
 ---
 
