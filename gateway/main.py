@@ -319,6 +319,22 @@ async def get_task(task_id: str, username: str = Depends(get_current_user)) -> D
     return r.json()
 
 
+@app.get("/tasks/{task_id}/events")
+async def get_task_events(
+    task_id: str,
+    username: str = Depends(get_current_user),
+    since_ts: float = Query(0.0),
+    include_payload: bool = Query(False),
+) -> Dict[str, Any]:
+    r = await _require_client().get(
+        f"/internal/tasks/{task_id}/events",
+        params={"user_id": username, "since_ts": since_ts, "include_payload": include_payload},
+    )
+    if r.status_code >= 400:
+        _raise_backend_error(r)
+    return r.json()
+
+
 @app.post("/tasks/{task_id}/resume")
 async def resume_task(task_id: str, username: str = Depends(get_current_user)) -> Dict[str, Any]:
     r = await _require_client().post(

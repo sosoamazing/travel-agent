@@ -1,11 +1,9 @@
 """一次性脚本：清空当前数据库里的所有观测指标（obs_* 表）。
 
 用途：
-- 观测数据模型已从「细粒度 span 树」改为「节点×Agent/模型×工具 聚合平均」，
-  旧表（obs_spans / obs_llm_outputs / obs_mcp_results 及旧版 obs_llm_metrics /
-  obs_mcp_metrics）全部废弃。
-- 本脚本 DROP 所有 obs_* 表（含新版表），下次 backend 启动时 _obs_storage._init_db
-  会用 IF NOT EXISTS 自动重建新表。
+- 清空当前 span 树观测表（含 LLM payload）以及历史遗留 obs_* 表。
+- 不删 prompt_versions（模板目录，不是任务日志）。
+- 下次 backend 启动时 _obs_storage._ensure_init 会用 IF NOT EXISTS 自动重建。
 
 运行（在 travel-agent/travel-agent 目录下）：
     python reset_observability.py
@@ -41,10 +39,11 @@ PG_DATABASE = os.getenv("PG_DATABASE", "travel_agent")
 # 全部 obs_* 表名（当前新版 span 树模型 + 历史遗留旧表），统一 DROP
 ALL_OBS_TABLES = [
     # ── 当前版本：通用 span 树模型（uuid span_id + parent_id 通用层级）──
-    "obs_tasks",
+    "obs_llm_payloads",
     "obs_node_spans",
     "obs_llm_spans",
     "obs_mcp_spans",
+    "obs_tasks",
     # ── 历史遗留旧表（早期模型，确保一并清空）──
     "obs_spans",
     "obs_llm_metrics",

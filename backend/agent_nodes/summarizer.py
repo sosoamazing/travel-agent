@@ -9,7 +9,7 @@ import logging
 
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 
-from ._common import _LLM, _token_tracker
+from ._common import _LLM
 from ._observability import node
 
 logger = logging.getLogger(__name__)
@@ -96,9 +96,6 @@ async def summarizer_node(state: Dict[str, Any]) -> Dict[str, Any]:
         await _persist_memory(state, city_plans, summary, spent, transport_costs)
     except Exception as e:
         logger.warning(f"🧠 [记忆] 规划落库失败: {e}")
-
-    # Token 使用统计（含 summarizer 自身调用）
-    logger.info(f"📊 [Token 统计]\n{_token_tracker.summary()}")
 
     return {
         "final_answer": summary,

@@ -1,6 +1,8 @@
 # 观测系统架构决策记录（ADR）
 
-> 目的：记录本项目观测系统（monitor + obs_* 表）的关键架构决策，防止后续改动时遗忘"为什么这么做"。
+> **已废止（2026-09）。** 本文记录的是「聚合平均 + Langfuse」阶段，与现行 **uuid span 树** 不符。
+> 现行方案：`docs/observability-design.md` + `docs/runtime-storage-and-mq.md`。
+> 下文仅作历史，勿按此实现。
 
 ## 背景与规模前提
 

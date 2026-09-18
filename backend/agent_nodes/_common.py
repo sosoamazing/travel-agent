@@ -4,11 +4,9 @@
 """
 from typing import Dict, Any, List, Optional
 from datetime import datetime
-from collections import defaultdict
 import asyncio
 import json
 import logging
-import threading
 import time
 
 from langchain_core.prompts import ChatPromptTemplate
@@ -18,98 +16,13 @@ from langchain_openai import ChatOpenAI
 from config.settings import (
     QWEN3_MODEL, QWEN3_TEMPERATURE,
     OPENAI_API_KEY, OPENAI_BASE_URL, DS_FLASH_MODEL, DS_FLASH_TEMPERATURE,
-    LLM_TIMEOUT_SEC, LLM_STREAM_TIMEOUT_SEC,
+    LLM_TIMEOUT_SEC, LLM_STREAM_TIMEOUT_SEC, LLM_PAYLOAD_MAX_CHARS,
     get_agent_model,
 )
 from tools.registry import get_tool_by_name
 from ._observability import start_llm, end_llm
 
 logger = logging.getLogger(__name__)
-
-
-# ──────────────────────────────────────────────────────────
-# Token 使用统计（全局单例，按模型累积）
-# ──────────────────────────────────────────────────────────
-
-class TokenUsageTracker:
-    """按模型 + 按 agent 双层累积 token 用量，线程安全。
-
-    维度 1：model → 汇总（input/output/total/call_count）
-    维度 2：agent → model → 汇总（用于打印"哪个 agent 消耗了多少"）
-    """
-
-    def __init__(self):
-        self._data: Dict[str, Dict[str, int]] = defaultdict(lambda: {
-            "input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "cached_tokens": 0, "call_count": 0,
-        })
-        # agent -> model -> 统计
-        self._agent_data: Dict[str, Dict[str, Dict[str, int]]] = defaultdict(lambda: defaultdict(lambda: {
-            "input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "cached_tokens": 0, "call_count": 0,
-        }))
-        self._lock = threading.Lock()
-
-    def add(self, model: str, input_tokens: int, output_tokens: int, agent: str = "unknown",
-            cached_input_tokens: int = 0):
-        with self._lock:
-            # 模型维度
-            d = self._data[model]
-            d["input_tokens"] += input_tokens
-            d["output_tokens"] += output_tokens
-            d["total_tokens"] += input_tokens + output_tokens
-            d["cached_tokens"] += cached_input_tokens
-            d["call_count"] += 1
-            # agent 维度
-            ad = self._agent_data[agent][model]
-            ad["input_tokens"] += input_tokens
-            ad["output_tokens"] += output_tokens
-            ad["total_tokens"] += input_tokens + output_tokens
-            ad["cached_tokens"] += cached_input_tokens
-            ad["call_count"] += 1
-
-    def summary(self) -> str:
-        if not self._data:
-            return "  (无 LLM 调用记录)"
-        lines = []
-        total_all = 0
-        lines.append("  ── 按模型 ──")
-        for model, d in self._data.items():
-            rate = ""
-            if d["cached_tokens"]:
-                rate = f"，缓存命中 {d['cached_tokens'] * 100 / max(d['input_tokens'], 1):.1f}%"
-            lines.append(
-                f"    {model}: {d['call_count']}次, "
-                f"输入 {d['input_tokens']} + 输出 {d['output_tokens']} = {d['total_tokens']} tokens{rate}"
-            )
-            total_all += d["total_tokens"]
-        lines.append(f"  ── 按模型合计: {total_all} tokens")
-        cached_total = sum(d["cached_tokens"] for d in self._data.values())
-        input_total = sum(d["input_tokens"] for d in self._data.values())
-        if input_total:
-            lines.append(
-                f"  ── 缓存命中率: 命中 {cached_total} / 输入 {input_total} "
-                f"= {cached_total * 100 / input_total:.1f}%"
-            )
-        lines.append("  ── 按 Agent ──")
-        for agent in sorted(self._agent_data):
-            a_in = sum(v["input_tokens"] for v in self._agent_data[agent].values())
-            a_out = sum(v["output_tokens"] for v in self._agent_data[agent].values())
-            a_count = sum(v["call_count"] for v in self._agent_data[agent].values())
-            model_detail = ", ".join(
-                f"{m} {v['call_count']}次" for m, v in self._agent_data[agent].items()
-            )
-            lines.append(
-                f"    {agent}: {a_count}次, "
-                f"输入 {a_in} + 输出 {a_out} = {a_in + a_out} tokens  [{model_detail}]"
-            )
-        return "\n".join(lines)
-
-    def reset(self):
-        with self._lock:
-            self._data.clear()
-            self._agent_data.clear()
-
-
-_token_tracker = TokenUsageTracker()
 
 
 # ──────────────────────────────────────────────────────────
@@ -225,14 +138,55 @@ def _extract_model(msg, fallback: str) -> str:
         return fallback
 
 
+def _serialize_llm_input(messages) -> tuple:
+    """把送进模型的 messages 序列化成可落库文本；超长截断。
+
+    返回 (text, truncated)。失败时退回 str(messages)。
+    """
+    try:
+        if isinstance(messages, (list, tuple)):
+            parts = []
+            for m in messages:
+                role = getattr(m, "type", None) or getattr(m, "role", None) or m.__class__.__name__
+                content = getattr(m, "content", m)
+                parts.append({"role": str(role), "content": content})
+            text = json.dumps(parts, ensure_ascii=False, default=str)
+        else:
+            text = json.dumps(messages, ensure_ascii=False, default=str)
+    except Exception:
+        text = str(messages)
+    truncated = len(text) > LLM_PAYLOAD_MAX_CHARS
+    if truncated:
+        text = text[:LLM_PAYLOAD_MAX_CHARS]
+    return text, truncated
+
+
 def _make_tracked_llm(kwargs: Dict[str, Any], agent: str = "unknown",
-                      parse_json: bool = False) -> ChatOpenAI:
+                      parse_json: bool = False,
+                      prompt_id: Optional[str] = None,
+                      prompt_version: Optional[str] = None) -> ChatOpenAI:
     """构造带 token 追踪的 ChatOpenAI：包装 ainvoke/astream 自动提取 token usage 并记录 agent 归属。"""
     base = ChatOpenAI(**kwargs)
 
     # 保存原始 ainvoke
     _orig_ainvoke = base.ainvoke
     _orig_astream = base.astream
+
+    async def _finish_llm(span_id: str, result: str, *, error_what: Optional[str] = None,
+                          input_tokens: int = 0, output_tokens: int = 0,
+                          cached_tokens: int = 0, output: str = "",
+                          messages=None) -> None:
+        input_text = None
+        truncated = False
+        if messages is not None:
+            input_text, truncated = _serialize_llm_input(messages)
+        await end_llm(
+            span_id, result=result, error_what=error_what,
+            input_tokens=input_tokens, output_tokens=output_tokens,
+            cached_tokens=cached_tokens, output=output,
+            prompt_id=prompt_id, prompt_version=prompt_version,
+            input_text=input_text, input_truncated=truncated,
+        )
 
     async def _tracked_ainvoke(input, config=None, **kw):
         t0 = time.perf_counter()
@@ -243,11 +197,12 @@ def _make_tracked_llm(kwargs: Dict[str, Any], agent: str = "unknown",
                 timeout=LLM_TIMEOUT_SEC,
             )
         except asyncio.TimeoutError:
-            await end_llm(span_id, result="timeout",
-                          error_what=f"timeout: {LLM_TIMEOUT_SEC:g}s")
+            await _finish_llm(span_id, "timeout",
+                              error_what=f"timeout: {LLM_TIMEOUT_SEC:g}s",
+                              messages=input)
             raise
         except Exception as e:
-            await end_llm(span_id, result="error", error_what=str(e))
+            await _finish_llm(span_id, "error", error_what=str(e), messages=input)
             raise
         inp, out, cached = _extract_usage(msg)
         model = _extract_model(msg, kwargs.get("model", "unknown"))
@@ -256,8 +211,6 @@ def _make_tracked_llm(kwargs: Dict[str, Any], agent: str = "unknown",
             # DeepSeek 等非流式接口可能不返回 usage，按字符估算兜底
             if content:
                 out = max(1, int(len(str(content)) / 2.5))
-        if inp or out:
-            _token_tracker.add(model, inp, out, agent=agent, cached_input_tokens=cached)
 
         # parse_json: 自动解析 JSON，失败用 flash 矫正（矫正发生在主 LLM span 还在栈上时，
         # 矫正的 ainvoke 会以主 LLM span 为 parent，成为其子 span）。
@@ -267,24 +220,25 @@ def _make_tracked_llm(kwargs: Dict[str, Any], agent: str = "unknown",
                 cleaned = extract_json_block(content)
                 parsed = json.loads(cleaned)
                 parsed_obj = _AIMessageFromDict(parsed, model=model)
-                await end_llm(span_id, result="ok",
-                              input_tokens=inp, output_tokens=out, cached_tokens=cached,
-                              output=str(content))
+                await _finish_llm(span_id, "ok",
+                                  input_tokens=inp, output_tokens=out, cached_tokens=cached,
+                                  output=str(content), messages=input)
                 return parsed_obj
             except Exception as _jerr:
                 try:
                     corrected = await fix_json_with_flash(content)
-                    await end_llm(span_id, result="ok",
-                                  input_tokens=inp, output_tokens=out, cached_tokens=cached,
-                                  output=str(content))
+                    await _finish_llm(span_id, "ok",
+                                      input_tokens=inp, output_tokens=out, cached_tokens=cached,
+                                      output=str(content), messages=input)
                     return _AIMessageFromDict(corrected, model=model)
                 except Exception as _cfail:
-                    await end_llm(span_id, result="parse_error", error_what=str(_cfail))
+                    await _finish_llm(span_id, "parse_error", error_what=str(_cfail),
+                                      messages=input)
                     raise ValueError(f"{agent} JSON 解析+矫正均失败: {_cfail}") from _cfail
 
-        await end_llm(span_id, result="ok",
-                      input_tokens=inp, output_tokens=out, cached_tokens=cached,
-                      output=str(content))
+        await _finish_llm(span_id, "ok",
+                          input_tokens=inp, output_tokens=out, cached_tokens=cached,
+                          output=str(content), messages=input)
         return msg
 
     async def _tracked_astream(input, config=None, **kw):
@@ -310,11 +264,12 @@ def _make_tracked_llm(kwargs: Dict[str, Any], agent: str = "unknown",
                         best_usage = (inp, out, cached)
                     yield chunk
         except asyncio.TimeoutError:
-            await end_llm(span_id, result="timeout",
-                          error_what=f"timeout: {LLM_STREAM_TIMEOUT_SEC:g}s")
+            await _finish_llm(span_id, "timeout",
+                              error_what=f"timeout: {LLM_STREAM_TIMEOUT_SEC:g}s",
+                              messages=input)
             raise
         except Exception as e:
-            await end_llm(span_id, result="error", error_what=str(e))
+            await _finish_llm(span_id, "error", error_what=str(e), messages=input)
             raise
         if full:
             if best_usage:
@@ -325,10 +280,9 @@ def _make_tracked_llm(kwargs: Dict[str, Any], agent: str = "unknown",
             if not (inp or out):
                 # 流式仍拿不到 usage 时，按字符估算（中英文混合 ~2.5 字/token）
                 out = max(1, int(len(all_text) / 2.5))
-            _token_tracker.add(model, inp, out, agent=agent, cached_input_tokens=cached)
-            await end_llm(span_id, result="ok",
-                          input_tokens=inp, output_tokens=out, cached_tokens=cached,
-                          output=all_text)
+            await _finish_llm(span_id, "ok",
+                              input_tokens=inp, output_tokens=out, cached_tokens=cached,
+                              output=all_text, messages=input)
 
     object.__setattr__(base, "ainvoke", _tracked_ainvoke)
     object.__setattr__(base, "astream", _tracked_astream)
@@ -353,7 +307,9 @@ class _LLM:
                  tags: Optional[List[str]] = None,
                  max_tokens: Optional[int] = None,
                  extra_body: Optional[Dict[str, Any]] = None,
-                 parse_json: bool = False):
+                 parse_json: bool = False,
+                 prompt_id: Optional[str] = None,
+                 prompt_version: Optional[str] = None):
         """统一 LLM 客户端。
 
         Args:
@@ -361,10 +317,13 @@ class _LLM:
             model_type: 'pro' | 'flash'。
             parse_json: True 时，ainvoke 返回后自动 `extract_json_block` + `json.loads`，
                 失败用 flash 矫正（矫正成为主 LLM 的子 span）。成功返回 dict，多次矫正失败抛 ValueError。
+            prompt_id / prompt_version: 可选模板目录指针，写入 obs_llm_spans。
         """
         self.agent = agent
         self.model_type = model_type
         self.parse_json = parse_json
+        self.prompt_id = prompt_id
+        self.prompt_version = prompt_version
         if model_type == "flash":
             model = get_agent_model(agent, DS_FLASH_MODEL)
             temp = temperature if temperature is not None else DS_FLASH_TEMPERATURE
@@ -389,7 +348,10 @@ class _LLM:
             kwargs["streaming"] = True
             kwargs["tags"] = tags or ["stream_to_user"]
         # 底层 Chat[OI] 的 ainvoke/astream 已被 _make_tracked_llm 包装（token 统计 + 观测落库）
-        self._llm = _make_tracked_llm(kwargs, agent=agent, parse_json=parse_json)
+        self._llm = _make_tracked_llm(
+            kwargs, agent=agent, parse_json=parse_json,
+            prompt_id=prompt_id, prompt_version=prompt_version,
+        )
 
     def ainvoke(self, messages, **kw):
         return self._llm.ainvoke(messages, **kw)
@@ -410,9 +372,11 @@ class _LLM:
         return self._llm.bind_tools(tools, **kw)
 
 
-async def _stream_reply(system_prompt: str, user_text: str, agent: str = "unknown") -> str:
+async def _stream_reply(system_prompt: str, user_text: str, agent: str = "unknown",
+                       prompt_id: Optional[str] = None,
+                       prompt_version: Optional[str] = None) -> str:
     """流式生成给用户的回复，返回完整文本（同时被 astream_events 捕获）"""
-    llm = _LLM(agent=agent, streaming=True)
+    llm = _LLM(agent=agent, streaming=True, prompt_id=prompt_id, prompt_version=prompt_version)
     text = ""
     async for chunk in llm.astream([SystemMessage(content=system_prompt), HumanMessage(content=user_text)]):
         text += chunk.content

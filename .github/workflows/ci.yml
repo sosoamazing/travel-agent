@@ -1,0 +1,125 @@
+# =============================================================================
+# CI：静态检查 + 数据库依赖测试 + Docker 镜像构建
+# -----------------------------------------------------------------------------
+# 三个 Job 相互独立：
+#   - static-checks : 无条件跑，最廉价，作为第一道门禁
+#   - tests         : 起 PostgreSQL service 容器跑数据库依赖的测试脚本
+#   - docker-build  : 验证多阶段 Dockerfile 能构建出可运行镜像
+#
+# 运行位置：仓库根（git 仓库即 travel-agent/travel-agent，见 README 目录结构）。
+# 注意：backend 依赖装自 backend/requirements.lock.txt（== 精确锁定）。
+# =============================================================================
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+jobs:
+  # ── Job 1: 静态检查（编译 + 前端构建）────────────────────────────────────
+  static-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.lock.txt
+
+      - name: Byte-compile all backend sources
+        run: |
+          python -m compileall -q backend gateway monitor
+          echo "✅ compileall passed"
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build frontend (catches JSX/syntax errors)
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+  # ── Job 2: 数据库依赖测试（起 PostgreSQL）──────────────────────────────
+  tests:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: travel_agent
+          POSTGRES_PASSWORD: travel_agent
+          POSTGRES_DB: travel_agent
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U travel_agent -d travel_agent"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.lock.txt
+
+      # 测试脚本通过 os.getenv 读取 PG_*，CI 里指向 service 容器；不依赖 .env。
+      # 测试只验证 span/DB/auth 基建，不触真实 LLM，故 key 留空安全。
+      - name: Run DB-dependent test scripts
+        working-directory: backend
+        env:
+          PG_HOST: 127.0.0.1
+          PG_PORT: "5432"
+          PG_USER: travel_agent
+          PG_PASSWORD: travel_agent
+          PG_DATABASE: travel_agent
+          OPENAI_API_KEY: ""
+          DASHSCOPE_API_KEY: ""
+        run: |
+          for t in tests/test_async_db.py \
+                   tests/test_obs_async.py \
+                   tests/test_auth_async.py \
+                   tests/test_chat_async.py \
+                   tests/test_memory_async.py; do
+            echo "=== $t ==="
+            PYTHONIOENCODING=utf-8 python "$t" || exit 1
+          done
+
+  # ── Job 3: Docker 镜像构建（验证 Dockerfile 与 .dockerignore）────────────
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: false
+          load: true
+          tags: travel-agent:ci
+          target: runtime

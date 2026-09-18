@@ -1,8 +1,8 @@
-# 可追溯性设计：自研 Span 树（最终方案）
+# 可追溯性设计：自研 Span 树（早期草稿）
 
-> 状态：**已定方案**（设计已评审，待按此实现）
-> 关联文档：`docs/observability-architecture.md`（原观测 ADR）
-> 目标读者：项目作者 / 面试评审 / 协作者
+> 状态：**已被 `docs/observability-design.md` 取代。** 文中「待实现 / INSERT+UPDATE / 自增 id」均已过时。
+> 现行写入是幂等 upsert；增量索引是 `(task_id, start_ts)`；LLM 输入在 `obs_llm_payloads`。
+> 补充：`docs/runtime-storage-and-mq.md`
 
 ---
 
@@ -101,7 +101,7 @@ CREATE TABLE IF NOT EXISTS obs_node_spans (
     start_ts        DOUBLE PRECISION NOT NULL,
     end_ts          DOUBLE PRECISION
 );
-CREATE INDEX IF NOT EXISTS idx_node_spans_task ON obs_node_spans(task_id);
+CREATE INDEX IF NOT EXISTS idx_node_spans_task_ts ON obs_node_spans(task_id, start_ts);
 
 -- ③ LLM 表：开始占位(running)，结束 UPDATE 补全（含流式输出）
 CREATE TABLE IF NOT EXISTS obs_llm_spans (
@@ -118,7 +118,7 @@ CREATE TABLE IF NOT EXISTS obs_llm_spans (
     start_ts        DOUBLE PRECISION NOT NULL,  -- 开始时间占位
     end_ts          DOUBLE PRECISION            -- 结束时更新
 );
-CREATE INDEX IF NOT EXISTS idx_llm_spans_task ON obs_llm_spans(task_id);
+CREATE INDEX IF NOT EXISTS idx_llm_spans_task_ts ON obs_llm_spans(task_id, start_ts);
 
 -- ④ MCP 表：开始占位(running)，返回 UPDATE 补全
 CREATE TABLE IF NOT EXISTS obs_mcp_spans (
@@ -133,7 +133,7 @@ CREATE TABLE IF NOT EXISTS obs_mcp_spans (
     start_ts        DOUBLE PRECISION NOT NULL,  -- 开始时间占位
     end_ts          DOUBLE PRECISION            -- 返回时更新
 );
-CREATE INDEX IF NOT EXISTS idx_mcp_spans_task ON obs_mcp_spans(task_id);
+CREATE INDEX IF NOT EXISTS idx_mcp_spans_task_ts ON obs_mcp_spans(task_id, start_ts);
 ```
 
 **设计要点**：

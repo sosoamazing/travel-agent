@@ -67,3 +67,4 @@ requests==2.34.2          # Streamlit 前端通过 HTTP 调用 FastAPI
 nest-asyncio==1.6.0
 numpy==2.5.1             # 语义检索中计算余弦相似度
 diskcache==5.6.3          # 本地磁盘级持久化缓存（工具查询/RAG 结果）
+redis==8.1.0              # 任务运行态 Hash（可选；REDIS_URL 未配置则跳过）

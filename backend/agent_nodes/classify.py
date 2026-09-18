@@ -20,13 +20,10 @@ logger = logging.getLogger(__name__)
 @node("classify")
 async def classify_node(state: Dict[str, Any]) -> Dict[str, Any]:
     user_query = state.get("user_query", "") or ""
-    llm = _LLM(agent="classify", temperature=0.3)
-    system_prompt = f"""你是查询分类器。判断用户查询属于哪一类：
-- feedback: 用户在表达偏好/反馈（如"我喜欢古镇"、"下次别推荐寺庙"、"预算改成3000"、"改成去杭州"）
-- conversation: 纯对话（问候、感谢、再见、"你是谁"等，不涉及旅行需求）
-- information: 通用信息查询（天气、两地距离、某地概况、美食推荐等，不涉及行程规划和预算）
-- travel: 旅游规划相关（需要规划多天/多城市行程、制定路线、安排住宿等）
-只返回分类结果：feedback / conversation / information / travel"""
+    from config.prompt_registry import get_prompt
+    system_prompt, prompt_ver = get_prompt("classify_system")
+    llm = _LLM(agent="classify", temperature=0.3,
+               prompt_id="classify_system", prompt_version=prompt_ver)
     try:
         resp = await llm.ainvoke([
             SystemMessage(content=system_prompt),
@@ -56,10 +53,11 @@ async def classify_node(state: Dict[str, Any]) -> Dict[str, Any]:
 @node("conversation_reply")
 async def conversation_reply_node(state: Dict[str, Any]) -> Dict[str, Any]:
     user_query = state.get("user_query", "") or ""
+    from config.prompt_registry import get_prompt
+    system_prompt, prompt_ver = get_prompt("conversation_reply")
     reply = await _stream_reply(
-        "你是一个友好的旅游助手。请用简洁、温暖的中文回复用户的问候或对话。",
-        user_query,
-        agent="conversation_reply",
+        system_prompt, user_query, agent="conversation_reply",
+        prompt_id="conversation_reply", prompt_version=prompt_ver,
     )
     return {
         "final_answer": reply,
@@ -95,10 +93,13 @@ async def handle_feedback_node(state: Dict[str, Any]) -> Dict[str, Any]:
     except Exception as e:
         logging.getLogger(__name__).warning(f"🧠 [情景记忆] 反馈回写失败: {e}")
 
+    from config.prompt_registry import get_prompt
+    system_prompt, prompt_ver = get_prompt("feedback_reply")
     reply = await _stream_reply(
-        "你是友好的旅游助手，请用亲切的中文回应，可自然提及已记住用户偏好。",
+        system_prompt,
         f"用户反馈：{user_feedback}\n确认信息：{msg}\n请给出友好回应：",
         agent="feedback",
+        prompt_id="feedback_reply", prompt_version=prompt_ver,
     )
     return {
         "final_answer": reply,

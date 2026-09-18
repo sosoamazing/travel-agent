@@ -1,0 +1,124 @@
+# =============================================================================
+# travel-agent 全栈编排：postgres + redis + backend + gateway + monitor
+# -----------------------------------------------------------------------------
+# 启动全部服务（在 git 仓库根 travel-agent/ 下执行）：
+#   docker compose up -d --build
+#
+# 只起数据库（本地跑 Python 时用）：
+#   docker compose up -d postgres
+#
+# 前置：把密钥写进 .env（OPENAI_API_KEY / DASHSCOPE_API_KEY / JWT_SECRET 等）。
+# 该文件通过 env_file 注入各服务，不会进镜像层（已在 .dockerignore 排除）。
+#
+# 安全约束：
+# - 仅 gateway 发布端口到宿主机（8000）。backend / monitor 不发布端口，
+#   只在 compose 内部网络可达，等价于原架构“backend 不对外直达”的假设
+#   （原实现靠绑定 127.0.0.1 达成，容器内改为“不发布端口”达成）。
+# =============================================================================
+
+services:
+  # ── 数据库：PostgreSQL + pgvector ────────────────────────────────────────
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: travel-agent-pg
+    environment:
+      POSTGRES_USER: ${PG_USER:-travel_agent}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-travel_agent}
+      POSTGRES_DB: ${PG_DATABASE:-travel_agent}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # 应用容器需等数据库真正可接受连接后再启动，否则首次建表会失败
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER:-travel_agent} -d ${PG_DATABASE:-travel_agent}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: travel-agent-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  # ── 业务核心：backend（内部服务，不对外发布端口）─────────────────────────
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: travel-agent:latest
+    container_name: travel-agent-backend
+    command: ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8001", "--app-dir", "/app/backend"]
+    env_file:
+      - .env
+    environment:
+      # 容器内用 compose 服务名寻址数据库，覆盖 .env 里的 localhost
+      PG_HOST: postgres
+      PG_PORT: "5432"
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    expose:
+      - "8001"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8001/internal/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+    restart: unless-stopped
+
+  # ── 对外网关：gateway（唯一发布到宿主机的服务）───────────────────────────
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: travel-agent:latest
+    container_name: travel-agent-gateway
+    command: ["uvicorn", "gateway.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    env_file:
+      - .env
+    environment:
+      BACKEND_URL: http://backend:8001
+      MONITOR_URL: http://monitor:8002
+      PG_HOST: postgres
+      PG_PORT: "5432"
+    depends_on:
+      - backend
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  # ── 监控：monitor（只读 obs_*，经 gateway 代理后由管理员访问）─────────────
+  monitor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: travel-agent:latest
+    container_name: travel-agent-monitor
+    command: ["uvicorn", "monitor.main:app", "--host", "0.0.0.0", "--port", "8002"]
+    env_file:
+      - .env
+    environment:
+      PG_HOST: postgres
+      PG_PORT: "5432"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    expose:
+      - "8002"
+    restart: unless-stopped
+
+volumes:
+  pgdata:

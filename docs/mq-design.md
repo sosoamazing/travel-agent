@@ -1,13 +1,32 @@
 # 消息队列（MQ）改造实现文档
 
-> 状态：**设计方案（待评审）**
+> 状态：**未实施；调度层以后按需再做。现行裁剪见 `docs/runtime-storage-and-mq.md`。**
 > 目标读者：项目作者 / 协作者 / 面试评审
-> 关联：`docs/observability-design.md`、`docs/traceability-design.md`
+> 关联：`docs/runtime-storage-and-mq.md`（权威）、`docs/observability-design.md`
+
+## 适用边界（重要）
+
+本文档只讨论**任务调度**的 MQ 化，即把 `submit_chat` → `asyncio.create_task` → 内存
+`TaskRecord` 这条链路改造成「入队 + 独立 worker 消费 + 状态外置」。
+
+**不包含观测 span 的写入。** span 写入已于 2026-08 采用**进程内异步写缓冲**方案
+（`backend/agent_nodes/_obs_storage.py` 的 `_SpanWriteBuffer`），不走 MQ，理由：
+
+- span 写入的**消费方只有一个**（写 PostgreSQL 供 monitor 读），扇出度 = 1，
+  不存在 MQ 所解决的「多消费者解耦」问题；
+- 需求本质只是「把 100+ 次同步 DB 往返移出业务关键路径」，进程内缓冲 + 批量
+  flush 即可完全解决，引入 broker 属于过度设计；
+- 树完整性由「`end_task` 写任务终态前强制 flush 该任务全部 span」保证，
+  不依赖 MQ 的持久化投递语义。
+
+> 一句话：**MQ 若做，只用于任务调度扩容；观测入库继续写缓冲 + upsert，不上 Kafka。**
+>
+> **2026-09 裁剪**：任务态已用 Redis Hash 旁路双写；调度仍是进程内 asyncio。
+> 出现多 worker / 排队不丢 / 多实例 SSE 再上 Redis Streams。本文其余章节是扩容方案草稿，不是当前实现。
 
 ---
 
 ## 1. 背景与动机
-
 ### 1.1 现状：进程内异步任务（in-process asyncio）
 
 当前 `backend/core/service.py` 用「进程内 asyncio」实现任务的异步执行与结果回传，核心链路：
@@ -280,3 +299,4 @@ async def stream_task(task_id, user_id):
 | 版本 | 日期 | 说明 |
 |---|---|---|
 | v1 | 2026-08-18 | 初稿：MQ 选型 + 总体架构 + 消息模型 + 分阶段改造 |
+| v2 | 2026-09-18 | 标明未实施；观测入库不走 MQ；调度待信号再上 Redis Streams |

@@ -11,6 +11,8 @@
 2. node/llm/mcp span 开始占位 + 结束更新
 3. end_task 更新任务状态
 4. build_task_json 组装并断言 summary / nodes
+5. LLM end 先于 start 的乱序 upsert：已有 output/input 不被空占位覆盖
+6. get_task_events 按 since_ts 增量拉取
 """
 from __future__ import annotations
 
@@ -156,11 +158,62 @@ async def test_obs_full_flow() -> None:
     print("  ✅ trace（点分路径 + 大 JSON）通过")
 
 
+async def test_llm_upsert_out_of_order_and_events() -> None:
+    print("\n" + "=" * 60)
+    print("📗 Test 2: LLM 乱序 upsert（end 先于 start）+ 增量 events")
+    print("=" * 60)
+
+    from agent_nodes._obs_storage import get_obs_storage
+
+    task_id = uuid.uuid4().hex
+    await start_task(task_id, user_id="_test_obs", session_id="_test_obs_sess", user_query="乱序")
+    span_id = uuid.uuid4().hex
+    storage = get_obs_storage()
+
+    # end 先到：完整行（含 output + payload input）
+    await storage.end_llm_span(
+        span_id, "ok", "ok",
+        input_tokens=10, output_tokens=4, cached_tokens=0,
+        output='{"ok":true}',
+        task_id=task_id,
+        prompt_id="classify_system",
+        prompt_version="deadbeef0123",
+        input_text='[{"role":"human","content":"hi"}]',
+        input_truncated=False,
+    )
+    # start 后到：不得把 output 打回 running / 空
+    await storage.start_llm_span(task_id, span_id, "classify_test", "classify", parent_id=None)
+    await storage.flush_task(task_id)
+
+    rows = await storage.get_llm_spans(task_id)
+    assert len(rows) == 1, rows
+    row = rows[0]
+    assert row["result_kind"] == "ok", row
+    assert row["output"] == '{"ok":true}', row
+    assert row["prompt_id"] == "classify_system", row
+    assert (row.get("input_tokens") or 0) == 10, row
+
+    events0 = await storage.get_task_events(task_id, since_ts=0.0, include_payload=True)
+    llm_ev = [e for e in events0 if e.get("span_type") == "llm"]
+    assert len(llm_ev) == 1, llm_ev
+    assert llm_ev[0].get("input") == '[{"role":"human","content":"hi"}]', llm_ev[0]
+    assert llm_ev[0].get("input_truncated") is False
+
+    # 增量：用当前 start_ts 作下限，应不再返回该 span
+    ts = float(row["start_ts"])
+    later = await storage.get_task_events(task_id, since_ts=ts, include_payload=False)
+    assert later == [], later
+
+    await end_task(result="ok")
+    print("  ✅ 乱序 upsert + 增量 events 通过")
+
+
 async def main() -> int:
     print("🚀 span 树观测层异步化 — 冒烟测试")
     print(f"   工作目录: {os.getcwd()}")
     try:
         await test_obs_full_flow()
+        await test_llm_upsert_out_of_order_and_events()
     finally:
         # 必须在同一事件循环内 await 关闭（跨 loop close 会 CancelledError）
         await db_module.shutdown_async_pool()

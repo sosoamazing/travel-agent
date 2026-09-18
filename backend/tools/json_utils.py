@@ -10,12 +10,17 @@ from typing import Optional
 from langchain_core.messages import SystemMessage, HumanMessage
 
 from agent_nodes._common import _LLM
+from config.prompt_registry import get_prompt
 from config.settings import JSON_FIX_MAX_ATTEMPTS
 
 logger = logging.getLogger(__name__)
 
 # ── 全局 DFS Flash 客户端（模块级单例，复用连接池；走 _LLM 以纳入 token 统计） ──
-_ds_flash_llm = _LLM(agent="json_fix", model_type="flash")
+_JSON_FIX_PROMPT, _JSON_FIX_VER = get_prompt("json_fix")
+_ds_flash_llm = _LLM(
+    agent="json_fix", model_type="flash",
+    prompt_id="json_fix", prompt_version=_JSON_FIX_VER,
+)
 
 
 def extract_json_block(text: str) -> str:
@@ -85,12 +90,7 @@ async def fix_json_with_flash(
         # 用 SystemMessage/HumanMessage 直接构造：schema_hint 常含 JSON 花括号字面量，
         # 走 ChatPromptTemplate 会二次插值报 "unmatched '{' in format spec"（项目硬约束）
         messages = [
-            SystemMessage(content=f"""你是一个 JSON 格式修正器。
-请将用户提供的内容转换为合法的 JSON，严格按以下规则：
-- 只输出 JSON，不要添加任何解释、代码块标记或其他文字
-- 确保所有引号、括号正确闭合
-- 字符串用双引号，不要用单引号
-- 期望的 JSON 结构: {schema_hint}"""),
+            SystemMessage(content=_JSON_FIX_PROMPT.replace("{schema_hint}", schema_hint)),
             HumanMessage(content=f"需要修正的内容：\n{last}"),
         ]
         resp = await _ds_flash_llm.ainvoke(messages)

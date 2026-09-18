@@ -69,6 +69,10 @@ export const api = {
   chat: (userQuery, sessionId) =>
     request('/chat', { method: 'POST', body: { user_query: userQuery, session_id: sessionId } }),
   getTask: (taskId) => request(`/tasks/${taskId}`),
+  getTaskEvents: (taskId, sinceTs = 0, includePayload = false) =>
+    request(
+      `/tasks/${encodeURIComponent(taskId)}/events?since_ts=${sinceTs}&include_payload=${includePayload}`,
+    ),
   adminTrace: (taskId) => request(`/obs/${encodeURIComponent(taskId)}/trace`),
 }
 

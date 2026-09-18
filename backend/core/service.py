@@ -188,6 +188,9 @@ class TaskRecord:
             "created_at": self.created_at,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
+            "user_id": self.user_id,
+            "session_id": self.session_id,
+            "user_query": self.user_query,
         }
 
 
@@ -290,12 +293,25 @@ class TravelService:
         return {"configurable": {"thread_id": thread_id}}
 
     async def close(self) -> None:
-        """进程退出前关闭 checkpoint 连接池（幂等）。"""
+        """进程退出前收尾（幂等）：flush 观测写缓冲 + 关闭 checkpoint 连接池。
+
+        观测缓冲需先于连接池关闭 flush，否则残留 span 无连接可写而丢失。
+        """
+        try:
+            from agent_nodes._obs_storage import get_obs_storage
+            await get_obs_storage().close()
+        except Exception as e:
+            logger.warning(f"flush 观测写缓冲失败: {e}")
         try:
             from core.checkpoint import close_checkpointer
             await close_checkpointer()
         except Exception as e:
             logger.warning(f"关闭 checkpointer 失败: {e}")
+        try:
+            from core.task_state import close as close_task_state
+            await close_task_state()
+        except Exception as e:
+            logger.warning(f"关闭 Redis 任务态失败: {e}")
 
     # ── 会话 / 消息 ────────────────────────────────────────
 
@@ -362,6 +378,8 @@ class TravelService:
                                content=user_query, user_id=user_id)
 
         record = self.tasks.create(user_query, session_id, user_id, intent)
+        from core.task_state import upsert_record
+        await upsert_record(record)
         record._asyncio_task = asyncio.create_task(self._run_task(record))
         return record.task_id
 
@@ -369,11 +387,39 @@ class TravelService:
         record = self.tasks.get(task_id)
         return record.snapshot() if record else None
 
-    async def get_task_from_db(self, task_id: str) -> Optional[Dict[str, Any]]:
-        """内存任务表缺失时回退查数据库（obs_tasks），拼出最小任务视图。
+    async def get_task_view(self, task_id: str) -> Optional[Dict[str, Any]]:
+        """读任务视图：本进程内存 → Redis → PG；PG 命中后回填 Redis。"""
+        record = self.tasks.get(task_id)
+        if record is not None:
+            return record.snapshot()
+        from core.task_state import get_view, upsert_view
+        cached = await get_view(task_id)
+        if cached is not None:
+            return cached
+        data = await self.get_task_from_db(task_id)
+        if data is not None:
+            await upsert_view({
+                "task_id": data.get("task_id") or task_id,
+                "status": data.get("status") or "",
+                "current_node": data.get("current_node") or "",
+                "progress_message": data.get("progress_message") or "",
+                "result": json.dumps(data.get("result"), ensure_ascii=False, default=str)
+                if data.get("result") is not None else "",
+                "error": data.get("error") or "",
+                "created_at": str(data.get("created_at") or ""),
+                "started_at": str(data.get("started_at") or ""),
+                "finished_at": str(data.get("finished_at") or ""),
+                "user_id": data.get("user_id") or "",
+                "session_id": data.get("session_id") or "",
+                "user_query": data.get("user_query") or "",
+            }, expire=data.get("status") in ("succeeded", "failed"))
+        return data
 
-        内存 self.tasks 在 backend 重启后清空，但观测数据持久化在 obs_tasks 表。
+    async def get_task_from_db(self, task_id: str) -> Optional[Dict[str, Any]]:
+        """内存/Redis 都 miss 时回退查 obs_tasks。
+
         业务 status 由 result_kind 推导：ok→succeeded / error→failed / running→running。
+        业务结果优先读 result_payload（任务结束时落库）。
         """
         from agent_nodes._obs_storage import get_obs_storage
         row = await get_obs_storage().get_task(task_id)
@@ -381,12 +427,19 @@ class TravelService:
             return None
         kind = row.get("result_kind") or ""
         status_map = {"ok": "succeeded", "error": "failed", "running": "running"}
+        payload = None
+        raw = row.get("result_payload")
+        if raw:
+            try:
+                payload = json.loads(raw)
+            except Exception:
+                payload = raw
         return {
             "task_id": task_id,
             "status": status_map.get(kind, kind or "pending"),
             "current_node": None,
             "progress_message": None,
-            "result": None,  # 业务结果 JSON 不落 obs_tasks；如需完整结果需查 checkpoint
+            "result": payload,
             "error": row.get("error_what"),
             "created_at": None,
             "started_at": row.get("start_ts"),
@@ -394,6 +447,30 @@ class TravelService:
             "user_id": row.get("user_id"),
             "session_id": row.get("session_id"),
             "user_query": row.get("user_query"),
+        }
+
+    async def get_task_events(self, task_id: str, since_ts: float = 0.0,
+                              include_payload: bool = False) -> Dict[str, Any]:
+        """增量拉某任务 start_ts > since_ts 的 span；读前先 flush 本任务缓冲。"""
+        from agent_nodes._obs_storage import get_obs_storage
+        storage = get_obs_storage()
+        await storage.flush_task(task_id)
+        events = await storage.get_task_events(
+            task_id, since_ts=since_ts, include_payload=include_payload,
+        )
+        next_since = since_ts
+        for ev in events:
+            try:
+                ts = float(ev.get("start_ts") or 0)
+            except Exception:
+                ts = 0.0
+            if ts > next_since:
+                next_since = ts
+        return {
+            "task_id": task_id,
+            "since_ts": since_ts,
+            "next_since_ts": next_since,
+            "events": events,
         }
 
     async def resume_task(self, task_id: str) -> str:
@@ -430,6 +507,8 @@ class TravelService:
             record.finished_at = None
             record.queue = asyncio.Queue()
 
+        from core.task_state import upsert_record
+        await upsert_record(record)
         record._asyncio_task = asyncio.create_task(self._run_task(record, resume=True))
         return task_id
 
@@ -441,14 +520,15 @@ class TravelService:
             resume: True 表示断点续跑——以 input=None + 同一 thread_id 重新 invoke，
                 LangGraph 会跳过已成功节点、从最近 checkpoint 继续。
         """
-        from agent_nodes._common import _token_tracker
         from agent_nodes._observability import (
             reset_observability, start_task, end_task,
         )
 
+        from core.task_state import upsert_record
         record.status = "running"
         record.started_at = time.time()
         record.progress_message = "正在从 checkpoint 续跑" if resume else "任务已开始"
+        await upsert_record(record)
 
         config = self._graph_config(record.task_id)
 
@@ -463,7 +543,6 @@ class TravelService:
             sem_acquired = True
             # 观测上下文：contextvars 保证与其它并发任务隔离
             reset_observability()
-            _token_tracker.reset()
             obs_task_id = await start_task(
                 record.task_id,   # 业务 task_id（= checkpoint thread_id）
                 user_id=record.user_id or "",
@@ -490,6 +569,7 @@ class TravelService:
                 if kind == "on_chain_start" and name in _NODE_NAMES:
                     record.current_node = name
                     record.progress_message = f"正在执行 {name}"
+                    await upsert_record(record)
                     await record.queue.put({"type": "progress", "node": name})
 
                 elif kind == "on_chat_model_stream":
@@ -545,6 +625,15 @@ class TravelService:
 
             record.result = serialized
             record.status = "succeeded"
+            try:
+                from agent_nodes._obs_storage import get_obs_storage
+                await get_obs_storage().update_task_result_payload(
+                    record.task_id, json.dumps(serialized, ensure_ascii=False, default=str),
+                )
+            except Exception as e:
+                logger.warning("写入 obs_tasks.result_payload 失败: %s", e)
+            else:
+                await upsert_record(record, expire=True)
             await record.queue.put({
                 "type": "final",
                 "text": accumulated,
@@ -561,6 +650,7 @@ class TravelService:
             record.error = str(e)
             if started_obs:
                 await end_task("error", str(e))
+            await upsert_record(record, expire=True)
             try:
                 await record.queue.put({"type": "error", "text": str(e)})
             except Exception:
@@ -573,6 +663,7 @@ class TravelService:
             record.finished_at = time.time()
             record.current_node = None
             record.progress_message = None
+            await upsert_record(record, expire=True)
             await record.queue.put(None)  # SSE 结束哨兵
 
     # ── 观测 ──────────────────────────────────────────────
@@ -613,9 +704,13 @@ class TravelService:
             mcp_status["servers"] = get_mcp_server_names()
         except Exception as e:
             mcp_status["error"] = str(e)
+        from core.task_state import ping as redis_ping
+        redis_status = await redis_ping()
+        ok = bool(db_status.get("ok")) and (redis_status.get("ok") or redis_status.get("skipped"))
         return {
-            "status": "ok" if db_status.get("ok") else "degraded",
+            "status": "ok" if ok else "degraded",
             "db": db_status,
+            "redis": redis_status,
             "mcp": mcp_status,
             "time": time.time(),
         }

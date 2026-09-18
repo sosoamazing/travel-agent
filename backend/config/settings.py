@@ -110,6 +110,13 @@ PG_USER = os.getenv("PG_USER", "travel_agent")
 PG_PASSWORD = os.getenv("PG_PASSWORD", "travel_agent")
 PG_DATABASE = os.getenv("PG_DATABASE", "travel_agent")
 
+# ========== Redis 任务态（可选；未配置则跳过，降级内存 + PG）==========
+REDIS_URL = os.getenv("REDIS_URL", "").strip()
+# 任务结束后 Redis Hash 过期时间（秒），覆盖「刚结束仍被轮询」窗口
+TASK_REDIS_TTL_SEC = int(os.getenv("TASK_REDIS_TTL_SEC", "86400"))
+# 渲染后的 LLM input 落库截断上限（字符）
+LLM_PAYLOAD_MAX_CHARS = int(os.getenv("LLM_PAYLOAD_MAX_CHARS", "32768"))
+
 # ========== 自驾费用配置（.env 可覆盖，业务参考价） ==========
 # 92号汽油每升价格（元），2026 年参考价
 FUEL_PRICE_PER_LITER = float(os.getenv("FUEL_PRICE_PER_LITER", "7.80"))

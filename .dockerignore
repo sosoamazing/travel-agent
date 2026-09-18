@@ -1,0 +1,61 @@
+# =============================================================================
+# Docker 构建上下文排除清单
+# -----------------------------------------------------------------------------
+# 目的：把构建上下文压到最小。本仓根目录下存在一个同名的项目内 venv
+# （travel-agent/，约 GB 级 site-packages），若不排除会被整体上传给 docker
+# daemon，导致构建极慢甚至 OOM。
+# =============================================================================
+
+# ── 项目内虚拟环境（最关键的一条）──────────────────────────────────────
+/travel-agent/
+.venv/
+venv/
+env/
+pyvenv.cfg
+
+# ── Python 缓存与构建产物 ──────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+sdist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ── 前端（后端镜像不需要；前端走 Vite 静态构建单独部署）────────────────
+frontend/node_modules/
+frontend/dist/
+node_modules/
+
+# ── 密钥与本地配置（务必不进镜像层）─────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── 运行期数据 / 日志 / 本地缓存 ────────────────────────────────────────
+logs/
+*.log
+backend/data/result.json
+backend/data/observability.json
+data/*.db
+chroma_db/
+.diskcache/
+
+# ── 版本控制与 IDE ──────────────────────────────────────────────────────
+.git/
+.gitignore
+.gitattributes
+.idea/
+.vscode/
+
+# ── 文档与测试脚手架（不影响服务运行）───────────────────────────────────
+docs/
+*.md
+!README.md
+test_questions.txt
+load_test_20users.py
+import_questions.py
+reset_observability.py
+start_services.ps1

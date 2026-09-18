@@ -295,22 +295,32 @@ async def chat(req: _ChatReq) -> Dict[str, Any]:
 async def get_task(task_id: str, user_id: str = Query("default_user")) -> Dict[str, Any]:
     """轮询任务状态 + 进度 + 最终结果。
 
-    优先内存任务表（含实时进度）；内存缺失（如 backend 重启后）回退查 obs_tasks 表，
-    返回基于观测数据的最小任务视图。
+    读路径：内存 TaskRecord → Redis Hash → obs_tasks（含 result_payload）。
     """
-    record = get_service().tasks.get(task_id)
-    if record is not None:
-        # 内存有：校验本人归属（非 obs 接口，无管理员白名单豁免）
-        if record.user_id != user_id:
-            raise HTTPException(status_code=403, detail="无权访问该任务")
-        return record.snapshot()
-    # 内存缺失：回退查 DB，并校验归属
-    data = await get_service().get_task_from_db(task_id)
+    data = await get_service().get_task_view(task_id)
     if data is None:
         raise HTTPException(status_code=404, detail="task not found")
     if (data.get("user_id") or "") != user_id:
         raise HTTPException(status_code=403, detail="无权访问该任务")
     return data
+
+
+@app.get("/internal/tasks/{task_id}/events")
+async def get_task_events(
+    task_id: str,
+    user_id: str = Query("default_user"),
+    since_ts: float = Query(0.0),
+    include_payload: bool = Query(False),
+) -> Dict[str, Any]:
+    """增量拉取某任务 start_ts > since_ts 的 span（user_id 只做归属校验）。"""
+    data = await get_service().get_task_view(task_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail="task not found")
+    if (data.get("user_id") or "") != user_id:
+        raise HTTPException(status_code=403, detail="无权访问该任务")
+    return await get_service().get_task_events(
+        task_id, since_ts=since_ts, include_payload=include_payload,
+    )
 
 
 @app.post("/internal/tasks/{task_id}/resume")

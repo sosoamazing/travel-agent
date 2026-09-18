@@ -1,7 +1,9 @@
 # 可观测性设计：通用 Span 树 + 双格式输出（最终方案）
 
-> 状态：**最终方案**（基于多轮讨论定稿）
-> 关联文档：`docs/observability-architecture.md`（原观测 ADR）、`docs/traceability-design.md`（早期设计草稿）
+> 状态：**已落地（2026-09 对齐运行态存储）**
+> 权威补充：`docs/runtime-storage-and-mq.md`（增量查询、LLM 版本/载荷、Redis 热状态、MQ 裁剪）
+> 关联：`docs/traceability-design.md`（早期草稿，以本文 + runtime 文档为准）
+> 已废止：`docs/observability-architecture.md`（聚合模型 ADR，与现行 span 树不符）
 > 目标读者：项目作者 / 面试评审 / 协作者
 
 ---
@@ -61,8 +63,9 @@
 - 无 `duration_ms`：由 `end_ts - start_ts` 推导。
 - `span_id`（uuid）作主键：**全局唯一**（跨表不冲突），代码生成（python uuid4）。
 - `parent_id`（uuid）引用父 span_id：`task → node → llm/mcp` 任意层级；node 的 parent 为 NULL（根级）。
-- 统一 result 双列：`result_kind` + `result` + `error_what`。
-- 统一「开始占位 + 结束更新」：开始 INSERT（`result='running'`），结束 UPDATE 补全。
+- 统一 result 双列：`result_kind` + `result` + `error_what`。`obs_tasks.result` 不是业务 JSON，业务结果在 `result_payload`。
+- 统一「开始占位 + 结束补全」：start/end 都走 `INSERT ... ON CONFLICT DO UPDATE`。乱序可接受；已有 `output` / payload.`input` 时，空值或 `running` 不得覆盖。
+- span 二级索引只有 `(task_id, start_ts)`。无时间下限时 `since_ts=0` 拉全量，不另建单列 `task_id`。
 
 ```sql
 -- ① 任务表：task_id=uuid 主键
@@ -78,9 +81,11 @@ CREATE TABLE IF NOT EXISTS obs_tasks (
     result          TEXT NOT NULL DEFAULT 'running',
     error_what      TEXT,
     client_duration_ms DOUBLE PRECISION,
+    result_payload  TEXT,                     -- 业务结果 JSON；result 列仍是粗粒度状态
     start_ts        DOUBLE PRECISION NOT NULL,
     end_ts          DOUBLE PRECISION
 );
+CREATE INDEX IF NOT EXISTS idx_obs_tasks_user_ts ON obs_tasks(user_id, start_ts DESC);
 
 -- ② 节点表：span_id=uuid 主键，parent_id 引用父 span_id（根级 NULL）
 CREATE TABLE IF NOT EXISTS obs_node_spans (
@@ -94,7 +99,7 @@ CREATE TABLE IF NOT EXISTS obs_node_spans (
     start_ts        DOUBLE PRECISION NOT NULL,
     end_ts          DOUBLE PRECISION
 );
-CREATE INDEX IF NOT EXISTS idx_node_spans_task ON obs_node_spans(task_id);
+CREATE INDEX IF NOT EXISTS idx_node_spans_task_ts ON obs_node_spans(task_id, start_ts);
 
 -- ③ LLM 表：span_id=uuid 主键，parent_id 引用父 span_id
 CREATE TABLE IF NOT EXISTS obs_llm_spans (
@@ -107,13 +112,15 @@ CREATE TABLE IF NOT EXISTS obs_llm_spans (
     output_tokens   INTEGER DEFAULT 0,
     cached_tokens   INTEGER DEFAULT 0,
     output          TEXT,
+    prompt_id       TEXT,
+    prompt_version  TEXT,
     result_kind     TEXT NOT NULL DEFAULT 'running',
     result          TEXT NOT NULL DEFAULT 'running',
     error_what      TEXT,
     start_ts        DOUBLE PRECISION NOT NULL,
     end_ts          DOUBLE PRECISION
 );
-CREATE INDEX IF NOT EXISTS idx_llm_spans_task ON obs_llm_spans(task_id);
+CREATE INDEX IF NOT EXISTS idx_llm_spans_task_ts ON obs_llm_spans(task_id, start_ts);
 
 -- ④ MCP 表：span_id=uuid 主键，parent_id 引用父 span_id
 CREATE TABLE IF NOT EXISTS obs_mcp_spans (
@@ -130,7 +137,26 @@ CREATE TABLE IF NOT EXISTS obs_mcp_spans (
     start_ts        DOUBLE PRECISION NOT NULL,
     end_ts          DOUBLE PRECISION
 );
-CREATE INDEX IF NOT EXISTS idx_mcp_spans_task ON obs_mcp_spans(task_id);
+CREATE INDEX IF NOT EXISTS idx_mcp_spans_task_ts ON obs_mcp_spans(task_id, start_ts);
+
+-- ⑤ 提示词模板目录（变更才插入，不随调用膨胀）
+CREATE TABLE IF NOT EXISTS prompt_versions (
+    prompt_id     TEXT NOT NULL,
+    version       TEXT NOT NULL,
+    content       TEXT NOT NULL,
+    content_hash  TEXT NOT NULL,
+    created_at    DOUBLE PRECISION NOT NULL,
+    PRIMARY KEY (prompt_id, version)
+);
+
+-- ⑥ 一次 LLM 调用的渲染后 input（1:1 span_id）
+CREATE TABLE IF NOT EXISTS obs_llm_payloads (
+    span_id     TEXT PRIMARY KEY,
+    task_id     TEXT NOT NULL REFERENCES obs_tasks(task_id),
+    input       TEXT,
+    truncated   BOOLEAN NOT NULL DEFAULT FALSE,
+    start_ts    DOUBLE PRECISION NOT NULL
+);
 ```
 
 **设计要点**：
@@ -138,7 +164,8 @@ CREATE INDEX IF NOT EXISTS idx_mcp_spans_task ON obs_mcp_spans(task_id);
 - **通用层级（可扩展）**：`task → node → llm/mcp` 是当前 3 层；未来矫正嵌套（llm 下挂 llm）、子规划（node 下挂子 node）只需设置 `parent_id`，无需改表结构。
 - **LLM 模型名不存表**：只存 `agent`，合并时按配置反查模型名。
 - **LLM 存输出字符串**：存模型返回原文，供复盘。
-- 统一「开始占位 + 返回补全」，`duration_ms = end_ts - start_ts`。
+- 统一幂等 upsert 补全，`duration_ms = end_ts - start_ts`。
+- LLM 输入：模板在 `prompt_versions`，渲染后全文在 `obs_llm_payloads`；`obs_llm_spans` 只存 `output` + 版本指针。
 
 ### 3.3 span 结果状态：双列（粗粒度 kind + 原因类型）
 
@@ -264,21 +291,16 @@ task_id.node.llm/mcp
 
 ## 4. 实现范围
 
-**已完成**：
-1. `_obs_storage.py`：4 表建表 + 读写（注意：当前是 `id SERIAL` + `result 双列` + `parent_id` 自增 id，需迁移为 uuid span_id）
-2. `_observability.py`：span 栈 + `set_span_result` + result 双列 + `build_task_json`
-3. `_common.py`：`_LLM(parse_json=True)` + `_AIMessageFromDict` + `end_llm` 适配
-4. `mcp_tools.py`：`end_mcp` 适配
-5. `monitor/analyze.py`：`load_from_db` 从 result 字段聚合
-6. 测试通过（当前自增 id 版本）
+**已落地**：
+1. uuid `span_id` + `parent_id` 通用层级；start/end 幂等 upsert
+2. `_SpanWriteBuffer` 批量 flush；`end_task` 前强制 flush
+3. `prompt_versions` + `obs_llm_payloads`；LLM 调用自动记渲染后 input
+4. span 索引 `(task_id, start_ts)`；`GET /tasks/{id}/events?since_ts=`
+5. `obs_tasks.result_payload` + Redis 任务热状态（见 runtime-storage-and-mq.md）
+6. `monitor/analyze.py` 按 `task_id IN (...)` 批量读三张 span 表
+7. `tests/test_obs_async.py`（含乱序 upsert）
 
-**待实施（迁移到 uuid span_id + 通用层级）**：
-1. `_obs_storage.py`：4 表 `id SERIAL` → `span_id TEXT PRIMARY KEY`，start_* 接收 uuid span_id，parent_id 引用 uuid
-2. `_observability.py`：start_* 生成 uuid span_id，span 栈存 uuid
-3. `_common.py` / `mcp_tools.py`：适配 uuid span_id
-4. `build_task_json`：从 span 树（parent_id）递归生成大 JSON + 点分路径
-5. `monitor/analyze.py`：适配 uuid span_id
-6. 重建 obs 表 + 更新测试 + 验证
+**不做**：Kafka / 观测入库走 MQ；单列 `task_id` 二级索引；`parent_table` 列。
 
 ---
 
@@ -287,7 +309,7 @@ task_id.node.llm/mcp
 | 风险 | 对策 |
 |---|---|
 | uuid span_id 可读性差 | 顺序由 `start_ts` 推导，不依赖 id 大小 |
-| 逐调用落库 DB 开销 | 开始占位 + 结束 UPDATE，避免高频写放大 |
+| 逐调用落库 DB 开销 | 写缓冲批量 flush + 幂等 upsert，乱序可接受 |
 | 存储体积膨胀 | LLM 存输出原文（可接受）；如需可加开关禁用 |
 | 并发归属错误 | 复用 contextvars 隔离 span 栈 |
 | parent 跨表歧义 | **uuid span_id 全局唯一**，彻底解决 |

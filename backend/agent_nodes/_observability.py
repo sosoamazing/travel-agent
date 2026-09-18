@@ -2,8 +2,7 @@
 
 设计要点：
 - 任务开始：`start_task(task_id, ...)` 前置插入 obs_tasks（task_id=业务 uuid，无自增 id）。
-- 节点 / LLM / MCP：调用开始先 INSERT 占位行（result_kind='running'，拿到 span 行 id），
-  调用结束 UPDATE 补全 end_ts / result / 指标。
+- 节点 / LLM / MCP：start/end 都走幂等 upsert（乱序可接受）；已有 output/input 不被空占位覆盖。
 - span 栈（contextvars）：每个任务一个栈，栈顶即当前父 span。LLM/MCP 以栈顶为 parent，
   嵌套调用（如矫正）自动成为父 span 的子。
 - result 双列：`result_kind`（running/ok/error）+ `result`（具体原因：ok/degraded/timeout/401/...）。
@@ -108,7 +107,7 @@ async def record_query_type(query_type: str):
 # ──────────────────────────────────────────────────────────
 
 async def start_node(name: str) -> str:
-    """节点调用开始：生成 uuid span_id，插入 node span 占位行，push 到 span 栈，返回 span_id。"""
+    """节点调用开始：生成 uuid span_id，幂等 upsert 占位行，push 到 span 栈。"""
     task_id = _current_task_id.get()
     if not task_id:
         return ""
@@ -120,9 +119,12 @@ async def start_node(name: str) -> str:
 
 
 async def end_node(span_id: str, result: str = "ok", error_what: Optional[str] = None):
-    """节点调用结束：UPDATE node span 补全 end_ts / result，并从 span 栈 pop。"""
+    """节点调用结束：幂等 upsert 补全 end_ts / result，并从 span 栈 pop。"""
     if span_id:
-        await get_obs_storage().end_node_span(span_id, _derive_kind(result), result, error_what)
+        await get_obs_storage().end_node_span(
+            span_id, _derive_kind(result), result, error_what,
+            task_id=_current_task_id.get() or "",
+        )
         _pop_if_top(span_id)
 
 
@@ -139,7 +141,9 @@ async def set_span_result(result: str, error_what: Optional[str] = None):
     if not stack:
         return
     # 栈顶通常是当前 node span；若嵌套在 llm/mcp 内，向上找最近的 node span id
-    await get_obs_storage().end_node_span(stack[-1], _derive_kind(result), result, error_what)
+    await get_obs_storage().end_node_span(
+        stack[-1], _derive_kind(result), result, error_what, task_id=task_id,
+    )
 
 
 # ──────────────────────────────────────────────────────────
@@ -147,10 +151,7 @@ async def set_span_result(result: str, error_what: Optional[str] = None):
 # ──────────────────────────────────────────────────────────
 
 async def start_llm(agent: str) -> str:
-    """LLM 调用开始：生成 uuid span_id，插入 llm span 占位行，以 span 栈顶为 parent，push 到栈。
-
-    流式调用同样只在此占位，流式过程中不写库，结束才 end_llm。
-    """
+    """LLM 调用开始：生成 uuid span_id，幂等 upsert 占位行，以 span 栈顶为 parent。"""
     task_id = _current_task_id.get()
     if not task_id:
         return ""
@@ -163,13 +164,25 @@ async def start_llm(agent: str) -> str:
 
 async def end_llm(span_id: str, result: str = "ok", error_what: Optional[str] = None,
                   input_tokens: int = 0, output_tokens: int = 0,
-                  cached_tokens: int = 0, output: str = "") -> None:
-    """LLM 调用结束：UPDATE llm span 补全 end_ts / token / output / result，并从栈 pop。"""
+                  cached_tokens: int = 0, output: str = "",
+                  prompt_id: Optional[str] = None,
+                  prompt_version: Optional[str] = None,
+                  input_text: Optional[str] = None,
+                  input_truncated: bool = False) -> None:
+    """LLM 调用结束：upsert span 补全 token / output / 版本指针 / payload，并从栈 pop。
+
+    乱序可接受：end 先到也能插入完整行；已有 output/input 时，空值不会覆盖。
+    """
     if span_id:
         await get_obs_storage().end_llm_span(
             span_id, _derive_kind(result), result, error_what,
             input_tokens=input_tokens, output_tokens=output_tokens,
             cached_tokens=cached_tokens, output=output,
+            task_id=_current_task_id.get() or "",
+            prompt_id=prompt_id,
+            prompt_version=prompt_version,
+            input_text=input_text,
+            input_truncated=input_truncated,
         )
         _pop_if_top(span_id)
 
@@ -192,9 +205,12 @@ async def start_mcp(server: str, tool: str) -> str:
 
 async def end_mcp(span_id: str, result: str = "ok", error_what: Optional[str] = None,
                   retries: int = 0) -> None:
-    """MCP 调用结束：UPDATE mcp span 补全 end_ts / retries / result，并从栈 pop。"""
+    """MCP 调用结束：幂等 upsert 补全 end_ts / retries / result，并从栈 pop。"""
     if span_id:
-        await get_obs_storage().end_mcp_span(span_id, _derive_kind(result), result, error_what, retries=retries)
+        await get_obs_storage().end_mcp_span(
+            span_id, _derive_kind(result), result, error_what, retries=retries,
+            task_id=_current_task_id.get() or "",
+        )
         _pop_if_top(span_id)
 
 
@@ -220,12 +236,16 @@ async def node_scope(name: str):
         yield
     except Exception as e:
         if span_id:
-            await get_obs_storage().end_node_span(span_id, "error", "error", str(e))
+            await get_obs_storage().end_node_span(
+                span_id, "error", "error", str(e), task_id=task_id or "",
+            )
             _pop_if_top(span_id)
         raise
     else:
         if span_id:
-            await get_obs_storage().end_node_span(span_id, "ok", "ok", None)
+            await get_obs_storage().end_node_span(
+                span_id, "ok", "ok", None, task_id=task_id or "",
+            )
             _pop_if_top(span_id)
     finally:
         if prev_node:
@@ -250,12 +270,16 @@ def node(name: str):
             try:
                 result = await fn(state, *args, **kwargs)
                 if span_id:
-                    await get_obs_storage().end_node_span(span_id, "ok", "ok", None)
+                    await get_obs_storage().end_node_span(
+                        span_id, "ok", "ok", None, task_id=task_id or "",
+                    )
                     _pop_if_top(span_id)
                 return result
             except Exception as e:
                 if span_id:
-                    await get_obs_storage().end_node_span(span_id, "error", "error", str(e))
+                    await get_obs_storage().end_node_span(
+                        span_id, "error", "error", str(e), task_id=task_id or "",
+                    )
                     _pop_if_top(span_id)
                 raise
             finally:
@@ -438,6 +462,8 @@ async def build_trace_json(task_id: str) -> Dict[str, Any]:
             out["output_tokens"] = int(sp.get("output_tokens") or 0)
             out["cached_tokens"] = int(sp.get("cached_tokens") or 0)
             out["output"] = sp.get("output")
+            out["prompt_id"] = sp.get("prompt_id")
+            out["prompt_version"] = sp.get("prompt_version")
         elif stype == "mcp":
             out["server"] = sp.get("server")
             out["tool"] = sp.get("tool")
@@ -529,6 +555,8 @@ def _llm_item(l: Dict[str, Any]) -> Dict[str, Any]:
         "output_tokens": int(l.get("output_tokens") or 0),
         "cached_tokens": int(l.get("cached_tokens") or 0),
         "output": l.get("output"),
+        "prompt_id": l.get("prompt_id"),
+        "prompt_version": l.get("prompt_version"),
         "duration_ms": _dur_ms(l),
         "result_kind": l.get("result_kind") or "ok",
         "result": l.get("result") or "ok",
