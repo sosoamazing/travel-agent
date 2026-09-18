@@ -139,14 +139,24 @@ CREATE TABLE IF NOT EXISTS obs_mcp_spans (
 );
 CREATE INDEX IF NOT EXISTS idx_mcp_spans_task_ts ON obs_mcp_spans(task_id, start_ts);
 
--- ⑤ 提示词模板目录（变更才插入，不随调用膨胀）
+-- ⑤ 提示词模板目录（agent 干活只查最新一行；变更才插入）
 CREATE TABLE IF NOT EXISTS prompt_versions (
-    prompt_id     TEXT NOT NULL,
+    agent         TEXT NOT NULL,
+    usage         TEXT NOT NULL,
     version       TEXT NOT NULL,
     content       TEXT NOT NULL,
-    content_hash  TEXT NOT NULL,
     created_at    DOUBLE PRECISION NOT NULL,
-    PRIMARY KEY (prompt_id, version)
+    PRIMARY KEY (agent, usage, version)
+);
+
+-- ⑤b 系统发布清单（只给管理员看，不参与取词）
+CREATE TABLE IF NOT EXISTS agent_releases (
+    version        TEXT PRIMARY KEY,
+    prev_version   TEXT,
+    git_commit     TEXT NOT NULL DEFAULT '',
+    note           TEXT,
+    prompt_set     JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at     DOUBLE PRECISION NOT NULL
 );
 
 -- ⑥ 一次 LLM 调用的渲染后 input（1:1 span_id）
@@ -165,7 +175,8 @@ CREATE TABLE IF NOT EXISTS obs_llm_payloads (
 - **LLM 模型名不存表**：只存 `agent`，合并时按配置反查模型名。
 - **LLM 存输出字符串**：存模型返回原文，供复盘。
 - 统一幂等 upsert 补全，`duration_ms = end_ts - start_ts`。
-- LLM 输入：模板在 `prompt_versions`，渲染后全文在 `obs_llm_payloads`；`obs_llm_spans` 只存 `output` + 版本指针。
+- LLM 输入：模板在 `prompt_versions`（`agent + usage + version + content`），运行时按槽位取 `ORDER BY created_at DESC LIMIT 1`；渲染后全文在 `obs_llm_payloads`；`obs_llm_spans` 只存 `output` + `prompt_id`（`agent/usage`）+ `prompt_version`。
+- `agent_releases` 是管理员发布说明（git + 当时 prompt 快照），agent 热路径不读这张表。
 
 ### 3.3 span 结果状态：双列（粗粒度 kind + 原因类型）
 
@@ -294,7 +305,7 @@ task_id.node.llm/mcp
 **已落地**：
 1. uuid `span_id` + `parent_id` 通用层级；start/end 幂等 upsert
 2. `_SpanWriteBuffer` 批量 flush；`end_task` 前强制 flush
-3. `prompt_versions` + `obs_llm_payloads`；LLM 调用自动记渲染后 input
+3. `prompt_versions(agent, usage, version, content)` 运行时取最新；`agent_releases` 管理员发布清单；`obs_llm_payloads` 记渲染后 input
 4. span 索引 `(task_id, start_ts)`；`GET /tasks/{id}/events?since_ts=`
 5. `obs_tasks.result_payload` + Redis 任务热状态（见 runtime-storage-and-mq.md）
 6. `monitor/analyze.py` 按 `task_id IN (...)` 批量读三张 span 表

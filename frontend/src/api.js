@@ -59,6 +59,8 @@ export const api = {
       `/admin/tasks?limit=${limit}${version ? `&version=${encodeURIComponent(version)}` : ''}`,
     ),
   adminVersions: () => request('/admin/versions'),
+  adminReleases: (limit = 50) =>
+    request(`/admin/releases?limit=${limit}`),
   me: () => request('/auth/me'),
   health: () => request('/health', { auth: false }),
   listSessions: (limit = 50) => request(`/sessions?limit=${limit}`),

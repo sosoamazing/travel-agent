@@ -257,6 +257,33 @@ def list_versions() -> List[str]:
         return []
 
 
+def list_releases(limit: int = 50) -> List[Dict[str, Any]]:
+    """管理员看的发布清单（agent_releases），不是运行时取词路径。"""
+    try:
+        with get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """SELECT version, prev_version, git_commit, note, prompt_set, created_at
+                   FROM agent_releases
+                   ORDER BY created_at DESC
+                   LIMIT %s""",
+                (limit,),
+            )
+            rows = [dict(r) for r in cur.fetchall()]
+            cur.close()
+        for row in rows:
+            ps = row.get("prompt_set")
+            if isinstance(ps, str):
+                try:
+                    row["prompt_set"] = json.loads(ps)
+                except Exception:
+                    pass
+        return rows
+    except Exception as e:
+        print(f"⚠️  list_releases 失败（{e}）")
+        return []
+
+
 def load_from_db(limit: int = 50, version: Optional[str] = None) -> List[Dict[str, Any]]:
     """从 DB 读取最近 N 条任务（可按 version 筛选），组装成标准化的任务列表。
 

@@ -9,7 +9,6 @@ import json
 import logging
 import time
 
-from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_openai import ChatOpenAI
 
@@ -20,6 +19,7 @@ from config.settings import (
     get_agent_model,
 )
 from tools.registry import get_tool_by_name
+from config.prompt_registry import get_prompt, prompt_id as make_prompt_id
 from ._observability import start_llm, end_llm
 
 logger = logging.getLogger(__name__)
@@ -372,6 +372,18 @@ class _LLM:
         return self._llm.bind_tools(tools, **kw)
 
 
+async def _llm_for_prompt(agent: str, usage: str, **kwargs) -> tuple:
+    """取该槽位最新模板并构造 _LLM。返回 (llm, content, version)。"""
+    content, ver = await get_prompt(agent, usage)
+    llm = _LLM(
+        agent=agent,
+        prompt_id=make_prompt_id(agent, usage),
+        prompt_version=ver,
+        **kwargs,
+    )
+    return llm, content, ver
+
+
 async def _stream_reply(system_prompt: str, user_text: str, agent: str = "unknown",
                        prompt_id: Optional[str] = None,
                        prompt_version: Optional[str] = None) -> str:
@@ -381,6 +393,20 @@ async def _stream_reply(system_prompt: str, user_text: str, agent: str = "unknow
     async for chunk in llm.astream([SystemMessage(content=system_prompt), HumanMessage(content=user_text)]):
         text += chunk.content
     return text
+
+
+async def _stream_prompt(agent: str, usage: str, user_text: str, **render) -> str:
+    """从 prompt_versions 取最新骨架，渲染后流式回复。"""
+    from config.prompt_registry import render_prompt
+
+    content, ver = await get_prompt(agent, usage)
+    return await _stream_reply(
+        render_prompt(content, **render) if render else content,
+        user_text,
+        agent=agent,
+        prompt_id=make_prompt_id(agent, usage),
+        prompt_version=ver,
+    )
 
 
 async def _call_mcp_tool(tool_name: str, **params) -> str:

@@ -9,7 +9,8 @@ import logging
 
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 
-from ._common import _LLM
+from config.prompt_registry import render_prompt
+from ._common import _llm_for_prompt
 from ._observability import node
 
 logger = logging.getLogger(__name__)
@@ -41,35 +42,19 @@ async def summarizer_node(state: Dict[str, Any]) -> Dict[str, Any]:
     few_shot = pc.get("memory_fewshot", "") or ""
     few_shot_lines = f"\n\n{few_shot}" if few_shot else ""
 
-    system_prompt = f"""你是一位专业的旅游规划师。请基于已完成的多城市规划数据，为用户生成一份完整、清晰、实用的旅行方案。
-
-{user_preferences_str}
-{few_shot_lines}
-
-核心规则：
-- 严格基于下方「城市计划数据」呈现，绝不编造景点/酒店/价格
-- city_plan 中可用字段：city, route_plan(含 selected_attractions/days/attractions_cost), hotels(含 name/price_per_night), selected_hotel(LLM 已选定的最佳酒店，含 name/price_per_night/selected_reason), transport_cost, hotel_cost, nights, per_city_budget
-- 禁止编造 city_plan 中不存在的字段，特别是：餐饮费、杂费、前期费用、已花销等。如需提及餐饮，仅作为行程建议而非预算项
-- 「累计已花」已经包含全部交通费+景点费+酒店费，是总花费，不要再拆分或额外叠加
-- 按城市顺序分段展示，每段包含：交通方案、每日行程（确保每景点≥1.5h、含2h午餐休息）、景点门票、**推荐酒店（优先展示 selected_hotel，并简述其位置/价格契合度，可再附 1-2 个备选）**、该市预算
-- 末尾给出总预算汇总（交通+门票+酒店）与剩余预算
-- 语气友好专业，使用 emoji 与分隔符提升可读性
-
-输出格式要求（重要）：
-- 使用纯 Markdown 格式，禁止使用 HTML 标签（特别是 <br>、<br/>、<p> 等）
-- 换行用 Markdown 方式：段落之间用空行分隔，列表项用 - 开头
-- 用 ## 作为城市分段标题，用 **加粗** 强调关键字段
-
-用户原始需求：{user_query}
-总预算：{total_budget:.0f} 元
-累计已花（=交通+景点+酒店总和，不要再叠加）：{spent:.0f} 元
-各段交通费用：{transport_text}
-
-城市计划数据：
-{plans_text}
-"""
-
-    llm = _LLM(agent="summarizer", model_type="flash", streaming=True)
+    llm, template, _ = await _llm_for_prompt(
+        "summarizer", "plan", model_type="flash", streaming=True,
+    )
+    system_prompt = render_prompt(
+        template,
+        user_preferences_str=user_preferences_str,
+        few_shot_lines=few_shot_lines,
+        user_query=user_query,
+        total_budget=f"{total_budget:.0f}",
+        spent=f"{spent:.0f}",
+        transport_text=transport_text,
+        plans_text=plans_text,
+    )
     # 注意：system_prompt 是 f-string 已格式化好的最终字符串，里面包含
     # plans_text / transport_text 的 JSON 字面量花括号。不能用 ChatPromptTemplate
     # （它会再次做 {var} 插值，遇到 JSON 花括号会报 "unmatched '{' in format spec"）。

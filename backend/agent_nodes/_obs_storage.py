@@ -45,6 +45,59 @@ from db import async_db_connection
 
 logger = logging.getLogger(__name__)
 
+
+_OLD_PROMPT_ID_MAP = {
+    "classify_system": ("classify", "system"),
+    "conversation_reply": ("conversation_reply", "system"),
+    "feedback_reply": ("feedback", "reply"),
+    "json_fix": ("json_fix", "system"),
+    "planner_system": ("planner", "extract"),
+}
+
+
+async def _migrate_prompt_versions_schema(cur) -> None:
+    """旧表是 (prompt_id, version)；新表是 (agent, usage, version)。有旧列则搬家后重建。"""
+    await cur.execute(
+        """SELECT column_name FROM information_schema.columns
+           WHERE table_schema='public' AND table_name='prompt_versions'"""
+    )
+    cols = {r["column_name"] for r in await cur.fetchall()}
+    if not cols:
+        return
+    if "agent" in cols and "usage" in cols and "prompt_id" not in cols:
+        return
+    await cur.execute("ALTER TABLE prompt_versions RENAME TO prompt_versions_legacy")
+    await cur.execute("""
+        CREATE TABLE prompt_versions (
+            agent         TEXT NOT NULL,
+            usage         TEXT NOT NULL,
+            version       TEXT NOT NULL,
+            content       TEXT NOT NULL,
+            created_at    DOUBLE PRECISION NOT NULL,
+            PRIMARY KEY (agent, usage, version)
+        )
+    """)
+    if "prompt_id" in cols:
+        await cur.execute(
+            "SELECT prompt_id, version, content, created_at FROM prompt_versions_legacy"
+        )
+        for row in await cur.fetchall():
+            pid = row["prompt_id"] or ""
+            mapped = _OLD_PROMPT_ID_MAP.get(pid)
+            if mapped:
+                agent, usage = mapped
+            elif "/" in pid:
+                agent, usage = pid.split("/", 1)
+            else:
+                continue
+            await cur.execute(
+                """INSERT INTO prompt_versions (agent, usage, version, content, created_at)
+                   VALUES (%s,%s,%s,%s,%s)
+                   ON CONFLICT (agent, usage, version) DO NOTHING""",
+                (agent, usage, row["version"], row["content"], row["created_at"] or time.time()),
+            )
+    await cur.execute("DROP TABLE prompt_versions_legacy")
+
 # 缓冲 flush 阈值：单任务累计待写操作数达到此值即触发一次即时 flush
 _FLUSH_BATCH_SIZE = 32
 # 后台 flush 轮询间隔（秒）：兜底把低于阈值的零散操作及时落库
@@ -241,12 +294,23 @@ class ObsStorage:
                         await cur.execute("ALTER TABLE obs_llm_spans ADD COLUMN IF NOT EXISTS prompt_version TEXT")
                         await cur.execute("""
                             CREATE TABLE IF NOT EXISTS prompt_versions (
-                                prompt_id     TEXT NOT NULL,
+                                agent         TEXT NOT NULL,
+                                usage         TEXT NOT NULL,
                                 version       TEXT NOT NULL,
                                 content       TEXT NOT NULL,
-                                content_hash  TEXT NOT NULL,
                                 created_at    DOUBLE PRECISION NOT NULL,
-                                PRIMARY KEY (prompt_id, version)
+                                PRIMARY KEY (agent, usage, version)
+                            )
+                        """)
+                        await _migrate_prompt_versions_schema(cur)
+                        await cur.execute("""
+                            CREATE TABLE IF NOT EXISTS agent_releases (
+                                version        TEXT PRIMARY KEY,
+                                prev_version   TEXT,
+                                git_commit     TEXT NOT NULL DEFAULT '',
+                                note           TEXT,
+                                prompt_set     JSONB NOT NULL DEFAULT '{}'::jsonb,
+                                created_at     DOUBLE PRECISION NOT NULL
                             )
                         """)
                         await cur.execute("""
@@ -260,14 +324,14 @@ class ObsStorage:
                         """)
                         await cur.execute("CREATE INDEX IF NOT EXISTS idx_llm_payloads_task_ts ON obs_llm_payloads(task_id, start_ts)")
                         try:
-                            from config.prompt_registry import all_prompts
+                            from config.prompt_registry import seed_rows
                             now = time.time()
-                            for pid, (body, ver) in all_prompts().items():
+                            for agent, usage, body, ver in seed_rows():
                                 await cur.execute(
-                                    """INSERT INTO prompt_versions (prompt_id, version, content, content_hash, created_at)
+                                    """INSERT INTO prompt_versions (agent, usage, version, content, created_at)
                                        VALUES (%s,%s,%s,%s,%s)
-                                       ON CONFLICT (prompt_id, version) DO NOTHING""",
-                                    (pid, ver, body, ver, now),
+                                       ON CONFLICT (agent, usage, version) DO NOTHING""",
+                                    (agent, usage, ver, body, now),
                                 )
                         except Exception as pe:
                             logger.warning("⚠️ 提示词版本目录预热失败: %s", pe)
@@ -568,19 +632,19 @@ class ObsStorage:
                     (payload, task_id),
                 )
 
-    async def upsert_prompt_version(self, prompt_id: str, version: str,
-                                    content: str, content_hash: str) -> None:
-        """模板目录：仅在未见过的 (prompt_id, version) 时插入。"""
-        if not prompt_id or not version:
+    async def upsert_prompt_version(self, agent: str, usage: str, version: str,
+                                    content: str) -> None:
+        """模板目录：仅在未见过的 (agent, usage, version) 时插入。"""
+        if not agent or not usage or not version:
             return
         await self._ensure_init()
         async with async_db_connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
-                    """INSERT INTO prompt_versions (prompt_id, version, content, content_hash, created_at)
+                    """INSERT INTO prompt_versions (agent, usage, version, content, created_at)
                        VALUES (%s,%s,%s,%s,%s)
-                       ON CONFLICT (prompt_id, version) DO NOTHING""",
-                    (prompt_id, version, content, content_hash, time.time()),
+                       ON CONFLICT (agent, usage, version) DO NOTHING""",
+                    (agent, usage, version, content, time.time()),
                 )
 
     async def get_task_events(self, task_id: str, since_ts: float = 0.0,

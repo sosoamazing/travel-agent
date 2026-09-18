@@ -125,25 +125,16 @@ async def decide_city_flags(
     known_lines = "\n".join(f"- {c}: {_brief(c)}" for c in known)
 
     from langchain_core.messages import HumanMessage
-    from agent_nodes._common import _LLM
-    llm = _LLM(agent="memory_flags", temperature=0.0)
+    from agent_nodes._common import _llm_for_prompt
+    from config.prompt_registry import render_prompt
 
-    prompt = f"""你是旅行规划的记忆决策器。用户此前有一个正在进行的旅行规划，现在提出了新的需求。
-请判断对每个已规划城市，是「keep」还是「replan」。
-
-判定规则：
-- keep：在原计划基础上继续（包括：已规划完且用户未要求修改该城；或该城只规划到一半需要接着补齐）
-- replan：用户的新需求明显影响了该城（改了该城景点/酒店/天数/偏好），或该城计划需要整体重做
-
-只输出 JSON，不要任何解释。格式：
-{{"flags": {{"城市名": "keep"或"replan", ...}}}}
-必须覆盖以下全部 {len(known)} 个城市。
-
-当前进行中的规划快照（各城状态）：
-{known_lines}
-
-用户最新需求：{user_query}
-"""
+    llm, template, _ = await _llm_for_prompt("memory_flags", "decide", temperature=0.0)
+    prompt = render_prompt(
+        template,
+        city_count=len(known),
+        known_lines=known_lines,
+        user_query=user_query,
+    )
     try:
         resp = await llm.ainvoke([HumanMessage(content=prompt)])
         from tools.json_utils import extract_json_block

@@ -10,8 +10,9 @@ import logging
 
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 
+from config.prompt_registry import render_prompt
 from config.settings import DRIVING_MAX_DISTANCE_KM
-from ._common import _LLM, _call_mcp_tool, _stream_reply
+from ._common import _call_mcp_tool, _llm_for_prompt, _stream_prompt
 from ._observability import node
 
 logger = logging.getLogger(__name__)
@@ -182,25 +183,18 @@ async def _decide_transport_mode(
         from tools.mcp_tools import get_mcp_manager
         manager = await get_mcp_manager()
 
-    llm = _LLM(agent="transport", temperature=0.0)
-
-    # ── Step 1: LLM 决定调用哪些工具 ──
-    prompt_tools = f"""可用工具：
-- train_query: 查询12306火车余票和票价（参数: origin, destination, date）
-- driving_cost_query: 查询自驾距离、油费、高速费、耗时（参数: from, to）
-
-请决定需要调用哪些工具来比较交通方案。
-输出要调用的工具名，用逗号分隔。例如：train_query,driving_cost_query
-若用户明确要求自驾，可只调用 driving_cost_query。
-只输出工具名，不要其他文字。
-
-路线：{from_city} → {to_city}
-用户查询：{user_query}
-出行日期：{travel_date or '未指定'}"""
+    llm_tools, tpl_tools, _ = await _llm_for_prompt("transport", "choose_tools", temperature=0.0)
+    prompt_tools = render_prompt(
+        tpl_tools,
+        from_city=from_city,
+        to_city=to_city,
+        user_query=user_query,
+        travel_date=travel_date or "未指定",
+    )
 
     tool_choices = ["train_query", "driving_cost_query"]  # 默认两个都调
     try:
-        resp = await llm.ainvoke([HumanMessage(content=prompt_tools)])
+        resp = await llm_tools.ainvoke([HumanMessage(content=prompt_tools)])
         raw_choice = resp.content.strip()
         parsed = [t.strip() for t in raw_choice.replace("，", ",").split(",") if t.strip()]
         if parsed:
@@ -261,31 +255,26 @@ async def _decide_transport_mode(
         persons = int(m_person.group(1))
     train_total = round(train_price * persons, 2) if train_price > 0 else 0
 
-    prompt_choice = f"""请从以下两个交通方案中选择更优的一个。
-
-选择规则：
-- 综合考虑价格、时间、便利性
-- 若自驾距离超过 {DRIVING_MAX_DISTANCE_KM}km，不推荐自驾
-- 若用户明确要求自驾/开车，选 driving
-- 只输出一个词：train 或 driving
-
-出行人数：{persons}人
-路线：{from_city} → {to_city}
-用户查询：{user_query}
-
-【方案1：火车】
-{train_brief}
-最低票价：{train_price}元/人，{persons}人合计约 {train_total}元
-
-【方案2：自驾】
-驾车距离：{distance_km}km
-预计耗时：{duration_hours}小时
-油费：{driving_data.get('fuel_cost', 0)}元
-高速费：{driving_data.get('toll_cost', 0)}元
-自驾总费用：{driving_cost}元（不随人数变化）"""
+    llm_choice, tpl_choice, _ = await _llm_for_prompt("transport", "choose_mode", temperature=0.0)
+    prompt_choice = render_prompt(
+        tpl_choice,
+        driving_max_km=DRIVING_MAX_DISTANCE_KM,
+        persons=persons,
+        from_city=from_city,
+        to_city=to_city,
+        user_query=user_query,
+        train_brief=train_brief,
+        train_price=train_price,
+        train_total=train_total,
+        distance_km=distance_km,
+        duration_hours=duration_hours,
+        fuel_cost=driving_data.get("fuel_cost", 0),
+        toll_cost=driving_data.get("toll_cost", 0),
+        driving_cost=driving_cost,
+    )
 
     try:
-        resp2 = await llm.ainvoke([HumanMessage(content=prompt_choice)])
+        resp2 = await llm_choice.ainvoke([HumanMessage(content=prompt_choice)])
         choice = resp2.content.strip().lower()
         if "driving" in choice and "train" not in choice:
             chosen = "driving"
@@ -347,14 +336,15 @@ async def _extract_transport_schedule(
             distance_km = 0
             duration_hours = 0
 
-        llm = _LLM(agent="transport", temperature=0.0)
-        prompt = f"""请估算合理的出发时间和到达时间，以及出发/到达的大致位置（如市中心）。
-输出 JSON：{{"departure_time": "HH:MM", "arrival_time": "HH:MM", "departure_location": "位置", "arrival_location": "位置"}}
-只输出 JSON，不要其他文字。
-
-自驾路线：{from_city} → {to_city}
-距离：{distance_km:.0f}km，预计行驶：{duration_hours:.1f}小时
-出行日期：{travel_date or '未指定'}"""
+        llm, template, _ = await _llm_for_prompt("transport", "estimate_schedule", temperature=0.0)
+        prompt = render_prompt(
+            template,
+            from_city=from_city,
+            to_city=to_city,
+            distance_km=f"{distance_km:.0f}",
+            duration_hours=f"{duration_hours:.1f}",
+            travel_date=travel_date or "未指定",
+        )
         try:
             resp = await llm.ainvoke([HumanMessage(content=prompt)])
             content = resp.content.strip().strip('`')
@@ -413,17 +403,15 @@ async def _extract_transport_cost(raw: str, user_query: str, from_city: str, to_
         return cost
 
     # 正则兜底失败 → LLM 解析
-    llm = _LLM(agent="transport", temperature=0.0)
-    prompt = f"""请从以下{mode}查询结果中，提取从 {from_city} 到 {to_city} 的最便宜票价（每人），并按用户查询中提到的人数计算该段总费用。
-
-规则：
-- 若无法识别票价，返回 0
-- 只输出一个数字（总费用，单位：元），不要任何文字或符号
-
-用户查询：{user_query}
-查询结果（节选）：
-{text}
-"""
+    llm, template, _ = await _llm_for_prompt("transport", "extract_fare", temperature=0.0)
+    prompt = render_prompt(
+        template,
+        mode=mode,
+        from_city=from_city,
+        to_city=to_city,
+        user_query=user_query,
+        text=text,
+    )
     try:
         resp = await llm.ainvoke([HumanMessage(content=prompt)])
         m = re.search(r"\d+(?:\.\d+)?", resp.content)
@@ -594,26 +582,18 @@ async def _stream_overbudget_plan(state: Dict[str, Any], budget_message: str) ->
     plans_text = json.dumps(city_plans, ensure_ascii=False, indent=2)
     transport_text = json.dumps(transport_costs, ensure_ascii=False, indent=2)
 
-    system_prompt = (
-        "你是友好的旅游助手。这份旅行规划已经**完整生成**（含每个城市的交通、每日行程、景点门票与酒店），"
-        "但系统已对各城市方案自动重规划最多 3 次，累计花费仍超出总预算，无法自动收敛。\n\n"
-        "请按以下要求回复：\n"
-        "1. 先把这份**完整规划方案**原样呈现给用户：按城市分段展示交通、每日行程、景点门票、"
-        "推荐酒店与费用，所有数字必须与上方计划数据一致，绝不编造；\n"
-        "2. 然后如实说明超支情况：累计花费、总预算（含弹性缓冲）、超支差额，以及主要超支的项目；\n"
-        "3. 说明系统自动规划/重规划已尽力，仍需要用户协助决定下一步；\n"
-        "4. 给出两个处理方向供用户选择：A. 调整需求（减少天数/城市数/更换目的地或出行日期等，系统可据此重新规划）；"
-        "B. 指定缩减某部分预算（如减少景点门票、降低酒店档次或住宿晚数、选择更经济的交通方式，系统可按指定部分重新规划）；\n"
-        "5. 结尾用一个明确的问题引导用户回复（例如：是否需要我调整需求，或者您想先缩减哪部分的预算？）。\n\n"
-        "使用 Markdown 格式，段落间用空行分隔，城市分段用 ## 标题，关键数字用 **加粗**。\n\n"
-        f"用户原始需求：{user_query}\n"
-        f"总预算：{total_budget:.0f} 元（含弹性缓冲 {buffer_budget:.0f} 元，即上限 {allow_total:.0f} 元）\n"
-        f"累计已花（=交通+景点+酒店总和）：{spent:.0f} 元\n"
-        f"超支差额：{overrun:.0f} 元\n"
-        f"各段交通费用：{transport_text}\n\n"
-        f"完整城市计划数据：\n{plans_text}"
+    llm, template, _ = await _llm_for_prompt("transport", "overbudget_plan", streaming=True)
+    system_prompt = render_prompt(
+        template,
+        user_query=user_query,
+        total_budget=f"{total_budget:.0f}",
+        buffer_budget=f"{buffer_budget:.0f}",
+        allow_total=f"{allow_total:.0f}",
+        spent=f"{spent:.0f}",
+        overrun=f"{overrun:.0f}",
+        transport_text=transport_text,
+        plans_text=plans_text,
     )
-    llm = _LLM(agent="transport", streaming=True)
     text = ""
     async for chunk in llm.astream([
         SystemMessage(content=system_prompt),
@@ -639,19 +619,7 @@ async def budget_fail_node(state: Dict[str, Any]) -> Dict[str, Any]:
             "系统已自动校验并选定交通方案，但预算仍无法满足全部行程，计划无法继续执行。"
         )
         # 流式输出预算不足说明，便于前端实时展示
-        reply = await _stream_reply(
-            f"你是友好的旅游助手。{replan_note}\n"
-            "请用真诚、委婉的语气向用户说明当前预算问题，并征询用户的处理意见：\n"
-            "1. 完整保留所有数字与关键信息（累计费用、总预算、超支差额、超支项目等），说明超出的具体部分；\n"
-            "2. 告知用户自动规划/重规划已尽力，仍需用户协助决定下一步；\n"
-            "3. 向用户给出两个处理方向供其选择：\n"
-            "   A. 调整需求：例如减少旅行天数、减少城市数量、更换目的地或出行日期，系统可据此重新规划；\n"
-            "   B. 指定缩减预算的部分：例如减少景点门票花费、降低酒店档次或住宿晚数、选择更经济的交通方式，"
-            "系统可按用户指定的部分重新规划；\n"
-            "4. 结尾用一个明确的问题引导用户回复（例如：是否需要我调整需求，或者您想先缩减哪部分的预算？）。",
-            msg,
-            agent="transport",
-        )
+        reply = await _stream_prompt("transport", "overbudget_early", msg)
     return {
         "final_answer": reply,
         "is_complete": True,

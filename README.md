@@ -345,7 +345,14 @@ travel-agent/travel-agent/
 ## 🛠️ 开发说明
 
 ### 修改 Prompt
-编辑 `backend/config/prompts.py`。
+运行时从 PostgreSQL `prompt_versions` 按 `agent + usage` 取最新模板。空库种子在 `backend/config/prompt_registry.py`。
+
+```bash
+python insert_prompt.py classify system path/to/classify.txt
+python record_release.py --note "调整 classify 分类规则"
+```
+
+`insert_prompt.py` 立刻影响下次 LLM 调用；`record_release.py` 只给管理员记一笔发布说明（管理端「系统发布」页）。
 
 ### 调整模型参数 / 配置
 编辑 `backend/config/settings.py`，或通过 `.env` 覆盖（`LLM_MODEL_<AGENT>` 可单独指定 agent 用 Pro 还是 Flash）。

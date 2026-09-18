@@ -8,7 +8,8 @@ import logging
 
 from langchain_core.messages import HumanMessage, AIMessage
 
-from ._common import _LLM, _stream_reply, _time_anchors
+from config.prompt_registry import render_prompt
+from ._common import _llm_for_prompt, _stream_prompt, _time_anchors
 from ._observability import node
 
 logger = logging.getLogger(__name__)
@@ -20,17 +21,14 @@ logger = logging.getLogger(__name__)
 
 async def _parse_cities_llm(user_query: str, destination: str, origin: str) -> List[str]:
     """LLM 从查询中解析按游览顺序排列的城市列表（若用户在出发地游览，可包含出发地为首城）"""
-    llm = _LLM(agent="params", temperature=0.0)
-    prompt = (f"从用户旅行查询中提取要游览的城市列表（按游览顺序排列）。\n"
-              f"规则：\n"
-              f"- 若用户明确要在出发地游览（如'先在本地玩几天再去...'），则将出发地作为第一个城市\n"
-              f"- 若出发地仅是起点不游览，则不要包含出发地\n"
-              f"- 只返回城市名，用逗号分隔，例如：上海,苏州,杭州。若只有一个城市就返回一个。\n"
-              f"\n"
-              f"{_time_anchors()}\n"
-              f"用户查询：{user_query}\n"
-              f"出发地：{origin}\n"
-              f"已提取的目的地字段：{destination}")
+    llm, template, _ = await _llm_for_prompt("params", "parse_cities", temperature=0.0)
+    prompt = render_prompt(
+        template,
+        time_anchors=_time_anchors(),
+        user_query=user_query,
+        origin=origin,
+        destination=destination,
+    )
     try:
         resp = await llm.ainvoke([HumanMessage(content=prompt)])
         parts = re.split(r"[，,、/]", resp.content)
@@ -125,11 +123,7 @@ async def ask_clarification_node(state: Dict[str, Any]) -> Dict[str, Any]:
     pc = state.get("planner_context") or {}
     question = pc.get("clarification_question") or "请提供更多关于您旅行计划的信息（目的地、出发地、天数、预算、日期）。"
     # 流式输出澄清问题，便于前端实时展示
-    reply = await _stream_reply(
-        "你是友好的旅游助手。请用亲切的语气重述以下澄清问题，保持原意，不要添加额外建议。",
-        question,
-        agent="params",
-    )
+    reply = await _stream_prompt("params", "clarify", question)
     return {
         "final_answer": reply,
         "is_complete": True,

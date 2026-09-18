@@ -6,12 +6,11 @@ import json
 import logging
 
 from pydantic import BaseModel, Field
-from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
 from config.settings import QWEN3_TEMPERATURE
-from config.prompts import PLANNER_SYSTEM_PROMPT
-from agent_nodes._common import _LLM, _time_anchors
+from config.prompt_registry import render_prompt
+from agent_nodes._common import _llm_for_prompt, _time_anchors
 
 logger = logging.getLogger(__name__)
 
@@ -58,14 +57,18 @@ async def extract_travel_plan(
     logger.info("🔧 [extract_travel_plan] 开始提取旅行计划参数")
     logger.info(f"   用户查询: {user_query}")
 
-    qwen3_llm = _LLM(agent="planner", temperature=QWEN3_TEMPERATURE, extra_body={"thinking": {"type": "disabled"}})
+    qwen3_llm, template, _ = await _llm_for_prompt(
+        "planner", "extract",
+        temperature=QWEN3_TEMPERATURE,
+        extra_body={"thinking": {"type": "disabled"}},
+    )
 
     try:
         qwen3_structured = qwen3_llm.with_structured_output(TravelPlanExtraction)
     except Exception:
         qwen3_structured = None
 
-    dynamic_prompt = PLANNER_SYSTEM_PROMPT.replace("{{NOW}}", _time_anchors())
+    dynamic_prompt = render_prompt(template, NOW=_time_anchors())
 
     messages = [SystemMessage(content=dynamic_prompt)]
     if conversation_history:
@@ -174,54 +177,17 @@ async def process_user_feedback(
     if current_profile is None:
         current_profile = {}
 
-    llm = _LLM(agent="feedback", temperature=0.3)
+    llm, template, _ = await _llm_for_prompt("feedback", "analyze", temperature=0.3)
+    system_prompt = render_prompt(
+        template,
+        current_profile=json.dumps(current_profile, ensure_ascii=False, indent=2),
+    )
 
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", """你是一个用户反馈分析专家。请分析用户的反馈，提取用户偏好的更新。
-
-当前用户档案：
-{current_profile}
-
-请分析用户的反馈，并只输出一个 JSON 对象，不要添加任何解释、代码块标记或其他文字：
-{{
-    "feedback_type": "positive|negative|neutral|core_change",
-    "preference_updates": {{
-        "travel_style": ["要添加的旅行风格"],
-        "destination_types": ["要添加的目的地类型"],
-        "budget_level": "预算水平",
-        "hotel_preference": ["要添加的住宿偏好"],
-        "dietary_restrictions": ["要添加的饮食禁忌"],
-        "cuisine_preference": ["要添加的菜系偏好"],
-        "liked_activities": ["要添加的喜欢的活动"],
-        "disliked_activities": ["要添加的不喜欢的活动"],
-        "transport_priority": ["交通优先级"]
-    }},
-    "confirmation_message": "给用户的友好确认消息，说明你记住了什么",
-    "needs_replan": true/false
-}}
-
-注意：
-- feedback_type 说明：
-  * positive: 正向反馈（"我喜欢古镇"）
-  * negative: 负向反馈（"我不喜欢寺庙"）
-  * neutral: 中性反馈
-  * core_change: 核心需求改变（如"预算改成2000"、"改成去杭州"、"改成玩5天"）
-- needs_replan:
-  * 如果是 core_change（核心需求改变），设为 true
-  * 如果只是微调偏好但核心需求没变，设为 false
-- 只在用户明确提到时才更新对应字段
-- 列表类型的字段是追加新项，不是替换
-- budget_level 可选值："经济型", "舒适型", "豪华型"
-- 如果用户没有提到某个偏好，就不要包含在 preference_updates 中
-- confirmation_message 要友好自然，让用户知道你记住了什么"""),
-        ("human", "用户反馈：{user_feedback}")
+    # ── 第 1 步：分析语义（只调 1 次） ──
+    response = await llm.ainvoke([
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=f"用户反馈：{user_feedback}"),
     ])
-
-    # ── 第 1 步：Qwen 分析语义（只调 1 次） ──
-    response = await (prompt | llm).ainvoke({
-        "user_feedback": user_feedback,
-        "current_profile": json.dumps(current_profile, ensure_ascii=False, indent=2),
-    })
 
     from tools.json_utils import extract_json_block
 

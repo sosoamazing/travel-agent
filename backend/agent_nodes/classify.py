@@ -7,7 +7,7 @@ import logging
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
-from ._common import _LLM, _stream_reply
+from ._common import _llm_for_prompt, _stream_prompt
 from ._observability import node
 
 logger = logging.getLogger(__name__)
@@ -20,10 +20,7 @@ logger = logging.getLogger(__name__)
 @node("classify")
 async def classify_node(state: Dict[str, Any]) -> Dict[str, Any]:
     user_query = state.get("user_query", "") or ""
-    from config.prompt_registry import get_prompt
-    system_prompt, prompt_ver = get_prompt("classify_system")
-    llm = _LLM(agent="classify", temperature=0.3,
-               prompt_id="classify_system", prompt_version=prompt_ver)
+    llm, system_prompt, _ = await _llm_for_prompt("classify", "system", temperature=0.3)
     try:
         resp = await llm.ainvoke([
             SystemMessage(content=system_prompt),
@@ -53,12 +50,7 @@ async def classify_node(state: Dict[str, Any]) -> Dict[str, Any]:
 @node("conversation_reply")
 async def conversation_reply_node(state: Dict[str, Any]) -> Dict[str, Any]:
     user_query = state.get("user_query", "") or ""
-    from config.prompt_registry import get_prompt
-    system_prompt, prompt_ver = get_prompt("conversation_reply")
-    reply = await _stream_reply(
-        system_prompt, user_query, agent="conversation_reply",
-        prompt_id="conversation_reply", prompt_version=prompt_ver,
-    )
+    reply = await _stream_prompt("conversation_reply", "system", user_query)
     return {
         "final_answer": reply,
         "is_complete": True,
@@ -93,13 +85,9 @@ async def handle_feedback_node(state: Dict[str, Any]) -> Dict[str, Any]:
     except Exception as e:
         logging.getLogger(__name__).warning(f"🧠 [情景记忆] 反馈回写失败: {e}")
 
-    from config.prompt_registry import get_prompt
-    system_prompt, prompt_ver = get_prompt("feedback_reply")
-    reply = await _stream_reply(
-        system_prompt,
+    reply = await _stream_prompt(
+        "feedback", "reply",
         f"用户反馈：{user_feedback}\n确认信息：{msg}\n请给出友好回应：",
-        agent="feedback",
-        prompt_id="feedback_reply", prompt_version=prompt_ver,
     )
     return {
         "final_answer": reply,

@@ -13,6 +13,7 @@
 4. build_task_json 组装并断言 summary / nodes
 5. LLM end 先于 start 的乱序 upsert：已有 output/input 不被空占位覆盖
 6. get_task_events 按 since_ts 增量拉取
+7. prompt_versions 按 agent/usage 取最新模板
 """
 from __future__ import annotations
 
@@ -176,7 +177,7 @@ async def test_llm_upsert_out_of_order_and_events() -> None:
         input_tokens=10, output_tokens=4, cached_tokens=0,
         output='{"ok":true}',
         task_id=task_id,
-        prompt_id="classify_system",
+        prompt_id="classify/system",
         prompt_version="deadbeef0123",
         input_text='[{"role":"human","content":"hi"}]',
         input_truncated=False,
@@ -190,7 +191,7 @@ async def test_llm_upsert_out_of_order_and_events() -> None:
     row = rows[0]
     assert row["result_kind"] == "ok", row
     assert row["output"] == '{"ok":true}', row
-    assert row["prompt_id"] == "classify_system", row
+    assert row["prompt_id"] == "classify/system", row
     assert (row.get("input_tokens") or 0) == 10, row
 
     events0 = await storage.get_task_events(task_id, since_ts=0.0, include_payload=True)
@@ -208,12 +209,37 @@ async def test_llm_upsert_out_of_order_and_events() -> None:
     print("  ✅ 乱序 upsert + 增量 events 通过")
 
 
+async def test_prompt_latest_lookup() -> None:
+    print("\n" + "=" * 60)
+    print("📗 Test 3: prompt_versions 按 agent/usage 取最新 + 种子回退")
+    print("=" * 60)
+
+    from agent_nodes._obs_storage import get_obs_storage
+    from config.prompt_registry import content_hash, get_prompt, insert_prompt, seed_prompt
+
+    await get_obs_storage()._ensure_init()
+    seed_body, seed_ver = seed_prompt("classify", "system")
+    latest, latest_ver = await get_prompt("classify", "system")
+    assert latest, "应能读到 classify/system"
+    assert latest_ver
+    print(f"  seed/latest version={latest_ver} len={len(latest)}")
+
+    extra = seed_body + "\n# probe " + uuid.uuid4().hex
+    extra_ver = content_hash(extra)
+    await insert_prompt("classify", "system", extra, version=extra_ver)
+    newest, newest_ver = await get_prompt("classify", "system")
+    assert newest_ver == extra_ver, (newest_ver, extra_ver)
+    assert newest == extra
+    print("  ✅ 插入后取到最新模板")
+
+
 async def main() -> int:
     print("🚀 span 树观测层异步化 — 冒烟测试")
     print(f"   工作目录: {os.getcwd()}")
     try:
         await test_obs_full_flow()
         await test_llm_upsert_out_of_order_and_events()
+        await test_prompt_latest_lookup()
     finally:
         # 必须在同一事件循环内 await 关闭（跨 loop close 会 CancelledError）
         await db_module.shutdown_async_pool()

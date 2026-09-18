@@ -11,7 +11,8 @@ from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 
 from tools.rag_tool import query_travel_knowledge
 from tools.registry.gaode import _unwrap_gaode
-from ._common import _LLM, _call_mcp_tool, _stream_reply, _now_str
+from config.prompt_registry import render_prompt
+from ._common import _call_mcp_tool, _llm_for_prompt, _stream_prompt, _now_str
 from ._observability import node
 from .city_planning import _extract_attractions
 
@@ -90,16 +91,16 @@ async def _run_info_tool_call(call: Dict) -> Tuple[str, str]:
     return tool, ""
 
 
-async def _llm_select_tools(user_query: str, system_hint: str) -> List[Dict]:
+async def _llm_select_tools(user_query: str) -> List[Dict]:
     """让 LLM 通过 bind_tools 选择工具（最多 _MAX_TOOL_CALLS 个）"""
     from tools.registry import get_info_query_tool_schemas
 
-    llm = _LLM(agent="info_query", temperature=0.0)
+    llm, template, _ = await _llm_for_prompt("info_query", "select_tools", temperature=0.0)
     tool_schemas = get_info_query_tool_schemas()
     llm_with_tools = llm.bind_tools(tool_schemas)
 
     resp = await llm_with_tools.ainvoke([
-        SystemMessage(content=f"{system_hint}\n\n当前时间：{_now_str()}"),
+        SystemMessage(content=render_prompt(template, max_tools=_MAX_TOOL_CALLS, now=_now_str())),
         HumanMessage(content=user_query),
     ])
 
@@ -132,12 +133,9 @@ async def information_query_node(state: Dict[str, Any]) -> Dict[str, Any]:
             episodes = await memory.search_episodes(user_id=user_id, limit=3)
             if episodes:
                 history_text = memory.format_episodes_for_prompt(episodes)
-                reply = await _stream_reply(
-                    "你是友好的旅游助手。用户询问自己之前的历史行程。"
-                    "请基于以下历史行程记录，用亲切、简洁的中文回答。"
-                    "若记录中缺少用户问的信息（如具体酒店名），如实说明未记录，不要编造。",
+                reply = await _stream_prompt(
+                    "info_query", "history",
                     f"用户查询：{user_query}\n\n历史行程记录：\n{history_text}",
-                    agent="info_query",
                 )
                 logger.info("🧠 [情景记忆] 历史行程问答命中，直接回答")
                 return {
@@ -149,10 +147,7 @@ async def information_query_node(state: Dict[str, Any]) -> Dict[str, Any]:
             logger.warning(f"🧠 [情景记忆] 历史查询检索失败，走常规流程: {e}")
 
     # ── Step 1: LLM bind_tools 选择工具 ──
-    tool_calls = await _llm_select_tools(
-        user_query,
-        f"你是信息查询助手，根据用户查询选择合适的工具。最多选{_MAX_TOOL_CALLS}个，按需选择。"
-    )
+    tool_calls = await _llm_select_tools(user_query)
 
     # ── Step 2: 工具执行（并发） ──
     results: List[str] = []
@@ -173,11 +168,9 @@ async def information_query_node(state: Dict[str, Any]) -> Dict[str, Any]:
         for i, r in enumerate(results)
     )
 
-    reply = await _stream_reply(
-        "你是一个友好的旅游助手。请基于以下查询结果，用亲切、简洁的中文回答用户。"
-        "如有具体数据（温度、距离、时间、八字、五行等），务必完整保留。不要编造信息。",
+    reply = await _stream_prompt(
+        "info_query", "answer",
         f"用户查询：{user_query}\n\n查询结果：\n{combined}",
-        agent="info_query",
     )
 
     return {
@@ -207,11 +200,7 @@ async def simple_rag_search_node(state: Dict[str, Any]) -> Dict[str, Any]:
 
     if not destination:
         # 没目的地也没预算，直接对话式回复
-        reply = await _stream_reply(
-            "你是友好的旅游助手。用户的查询信息不足，请用友好的语气询问用户想去哪个城市。",
-            user_query,
-            agent="info_query",
-        )
+        reply = await _stream_prompt("info_query", "ask_destination", user_query)
         return {
             "final_answer": reply,
             "is_complete": True,
@@ -219,12 +208,7 @@ async def simple_rag_search_node(state: Dict[str, Any]) -> Dict[str, Any]:
         }
 
     # ── Step 1: LLM bind_tools 选择工具（最多7个） ──
-    tool_calls = await _llm_select_tools(
-        user_query,
-        f"你是旅游信息检索助手。用户想了解目的地「{destination}」的相关信息。"
-        f"请根据用户查询选择合适的工具，最多选{_MAX_TOOL_CALLS}个。"
-        f"建议至少选择 rag（检索攻略）和 poi（搜索景点）以获得全面的景点推荐。"
-    )
+    tool_calls = await _llm_select_tools(user_query)
 
     # ── Step 2: 强制保证 RAG + POI 被执行 ──
     has_rag = any(c.get("tool") == "rag" for c in tool_calls)

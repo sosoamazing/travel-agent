@@ -11,6 +11,7 @@ const TABS = [
   { id: 'intent', label: '意图识别' },
   { id: 'errors', label: '错误样本' },
   { id: 'tasks', label: '最近任务' },
+  { id: 'releases', label: '系统发布' },
 ]
 
 /* ── 格式化工具 ─────────────────────────── */
@@ -317,6 +318,7 @@ export default function AdminPage({ onLogout }) {
   const [reportError, setReportError] = useState('')
   const [version, setVersion] = useState('')
   const [versions, setVersions] = useState([])
+  const [releases, setReleases] = useState([])
 
   const [admins, setAdmins] = useState([])
   const [adminsError, setAdminsError] = useState('')
@@ -338,14 +340,16 @@ export default function AdminPage({ onLogout }) {
     setReportError('')
     setVersion(ver)
     try {
-      const [r, t, v] = await Promise.all([
+      const [r, t, v, rel] = await Promise.all([
         api.adminReport(ver),
         api.adminTasks(50, ver),
         api.adminVersions(),
+        api.adminReleases(50),
       ])
       setReport(r)
       setTasks(Array.isArray(t) ? t : [])
       setVersions(Array.isArray(v) ? v : [])
+      setReleases(Array.isArray(rel) ? rel : [])
     } catch (err) {
       setReportError(err.message || '加载监控数据失败，请稍后重试')
     } finally {
@@ -820,6 +824,44 @@ export default function AdminPage({ onLogout }) {
     }
   }
 
+  function renderReleases() {
+    if (releases.length === 0) {
+      return <div className="empty-hint">暂无系统发布记录。改提示词后可用 record_release.py 记一笔。</div>
+    }
+    return (
+      <div className="admin-table-wrap">
+        <table className="admin-table">
+          <thead>
+            <tr>
+              <th>发布号</th>
+              <th>上一版</th>
+              <th>Git</th>
+              <th>说明</th>
+              <th>提示词槽位数</th>
+              <th>时间</th>
+            </tr>
+          </thead>
+          <tbody>
+            {releases.map((r) => {
+              const set = r.prompt_set && typeof r.prompt_set === 'object' ? r.prompt_set : {}
+              const n = Object.keys(set).length
+              return (
+                <tr key={r.version}>
+                  <td className="cell-id">{r.version}</td>
+                  <td>{r.prev_version || '—'}</td>
+                  <td className="cell-id">{r.git_commit || '—'}</td>
+                  <td className="cell-query" title={r.note || ''}>{shortQuery(r.note)}</td>
+                  <td>{n || '—'}</td>
+                  <td>{fmtTime(r.created_at ? r.created_at * 1000 : r.created_at)}</td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+    )
+  }
+
   function renderTasks() {
     if (tasks.length === 0) return <div className="empty-hint">暂无任务记录</div>
     return (
@@ -1044,7 +1086,7 @@ export default function AdminPage({ onLogout }) {
                 ))}
               </select>
               {versions.length > 0 && (
-                <span className="admin-version-hint">按代码版本筛选观测指标</span>
+                <span className="admin-version-hint">按任务版本筛选观测指标</span>
               )}
             </section>
 
@@ -1070,6 +1112,7 @@ export default function AdminPage({ onLogout }) {
                 {activeTab === 'intent' && renderIntent()}
                 {activeTab === 'errors' && renderErrors()}
                 {activeTab === 'tasks' && renderTasks()}
+                {activeTab === 'releases' && renderReleases()}
               </div>
             </section>
           </>

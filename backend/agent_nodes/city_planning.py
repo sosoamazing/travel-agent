@@ -15,7 +15,8 @@ from langchain_core.messages import HumanMessage
 from tools.rag_tool import query_travel_knowledge
 from tools.registry.gaode import _unwrap_gaode, resolve_geo_location
 from config.settings import PLAN_MAX_REPLAN, CITY_PLAN_MAX_CONCURRENCY
-from ._common import _LLM, _call_mcp_tool
+from config.prompt_registry import render_prompt
+from ._common import _call_mcp_tool, _llm_for_prompt
 from ._observability import node, node_scope
 from memory import get_memory_manager
 from memory.base import (
@@ -46,31 +47,19 @@ async def _extract_attractions(rag_raw: str, poi_raw: str, city: str,
                                preferences: List[str], user_query: str,
                                few_shot: str = "") -> List[Dict]:
     """综合 RAG + 高德 POI + LLM 训练记忆，提取候选景点（含备份）"""
-    llm = _LLM(agent="attractions", temperature=0.3, extra_body={"thinking": {"type": "disabled"}})
+    llm, template, _ = await _llm_for_prompt(
+        "attractions", "extract", temperature=0.3, extra_body={"thinking": {"type": "disabled"}},
+    )
     few_shot_lines = f"\n\n{few_shot}" if few_shot else ""
-    prompt = f"""请提取该城市的适量候选景点（6-10 个，需含备份景点），每个景点包含：
-- name: 名称
-- ticket_price: 门票价格（元/人），无门票填 0
-- visit_hours: 建议游玩时长（小时），每个至少 1.5
-- location: 经纬度 "lng,lat"（尽量从高德 POI 结果中取，没有则空）
-- description: 一句话特色
-
-要求：
-1. 优先选择符合用户偏好的景点
-2. 必须包含备份景点（多于实际游玩数量）
-3. 若 RAG 与 POI 均为空，可凭训练记忆给出该城市知名景点
-
-城市：{city}
-用户偏好：{preferences}
-用户查询：{user_query}
-{few_shot_lines}
-
-【RAG 知识库攻略】
-{str(rag_raw) if rag_raw else "（空）"}
-
-【高德 POI 搜索结果（含 location 坐标）】
-{str(poi_raw) if poi_raw else "（空）"}
-"""
+    prompt = render_prompt(
+        template,
+        city=city,
+        preferences=preferences,
+        user_query=user_query,
+        few_shot_lines=few_shot_lines,
+        rag_raw=str(rag_raw) if rag_raw else "（空）",
+        poi_raw=str(poi_raw) if poi_raw else "（空）",
+    )
     try:
         structured = llm.with_structured_output(_AttractionList)
         data: _AttractionList = await structured.ainvoke([HumanMessage(content=prompt)])
@@ -138,10 +127,8 @@ async def _query_leg_distance(origin_loc: str, dest_loc: str) -> float:
         if paths and isinstance(paths, list) and paths[0].get("distance") is not None:
             return float(paths[0]["distance"]) / 1000.0
         # 兜底：让 LLM 解析
-        llm = _LLM(agent="route_distance", temperature=0.0)
-        resp = await llm.ainvoke([HumanMessage(
-            content=f"从以下高德驾车路线结果中提取距离（公里）。只输出数字。\n{str(raw)}"
-        )])
+        llm, template, _ = await _llm_for_prompt("route_distance", "parse", temperature=0.0)
+        resp = await llm.ainvoke([HumanMessage(content=render_prompt(template, raw=str(raw)))])
         m = re.search(r"\d+(?:\.\d+)?", resp.content)
         return float(m.group()) if m else -1.0
     except Exception:
@@ -153,7 +140,9 @@ async def _plan_city_route(city: str, attractions: List[Dict], planner_context: 
                            is_replan: bool, replan_count: int,
                            transport_ctx: Dict = None) -> Dict[str, Any]:
     """让 plan-agent 选择景点、规划路线、校验时间与预算约束"""
-    llm = _LLM(agent="route_plan", temperature=0.3, extra_body={"thinking": {"type": "disabled"}})
+    llm, template, _ = await _llm_for_prompt(
+        "route_plan", "plan", temperature=0.3, extra_body={"thinking": {"type": "disabled"}},
+    )
     travel_days = planner_context.get("travel_days", 1) or 1
     preferences = planner_context.get("preferences", [])
     cities_count = max(1, planner_context.get("_cities_count", 1))
@@ -189,32 +178,19 @@ async def _plan_city_route(city: str, attractions: List[Dict], planner_context: 
         for a in attractions
     )
 
-    prompt = f"""你是旅行路线规划师。请为「以上城市」规划景点游玩路线。
-
-约束条件：
-- 每个景点至少 1.5 小时游玩
-- 每天午饭 + 休息按 2 小时计（在 _DayPlan 中 lunch=true 表示已安排）
-- 时间要够用，景点数量要合理
-- 计算总门票费用 total_ticket_cost（按 1 人计）
-- inter_attraction_transport_cost 先给一个粗估（市内交通总和，元）
-
-每日计划需包含：
-- starting_point: 当日出发地（如酒店名、车站区域，首日通常为抵达车站/机场附近）
-- departure_time: 建议出发时间（格式 HH:MM，如 08:30）
-- daily_starting_point: 全市统一的每日出发参考点（供总结时统一描述）
-
-输出 selected_attractions（选定的景点名列表）、days（每日行程，含 starting_point / departure_time / stops）、total_ticket_cost、inter_attraction_transport_cost、daily_starting_point、reasoning。
-
-【城市】{city}
-【建议游玩天数】{suggested_days} 天（总旅行天数 {travel_days}，共 {cities_count} 个城市）{budget_hint}{transport_hint}
-{few_shot_lines}
-
-候选景点：
-{attraction_lines or "（无候选，请凭训练记忆给出该城市知名景点作为候选并选择）"}
-
-用户偏好：{preferences}
-用户查询：{user_query}
-"""
+    prompt = render_prompt(
+        template,
+        city=city,
+        suggested_days=suggested_days,
+        travel_days=travel_days,
+        cities_count=cities_count,
+        budget_hint=budget_hint,
+        transport_hint=transport_hint,
+        few_shot_lines=few_shot_lines,
+        attraction_lines=attraction_lines or "（无候选，请凭训练记忆给出该城市知名景点作为候选并选择）",
+        preferences=preferences,
+        user_query=user_query,
+    )
     plan_dict: Dict[str, Any]
     try:
         structured = llm.with_structured_output(_CityRoutePlan)
@@ -482,37 +458,22 @@ async def _extract_hotels(hotel_raw: str, city: str, planner_context: Dict,
         for h in hotels_raw
     ]
     date_hint = f"入住日期：{travel_date}（共 {travel_days} 天）" if travel_date else "入住日期：未知"
-    prompt = f"""请为列表中每个酒店给出**该入住日期**的每晚房价估价（元/晚）。
-
-价格规则：
-- 凭酒店名称/品牌/类型，给出该城市该档次酒店的合理估价（元/晚）。
-  例：经济型连锁（汉庭、如家、7天）≈150-300；中端（全季、桔子水晶、亚朵）≈300-600；
-  高端（香格里拉、洲际、喜来登）≈800-1500；青年旅舍 ≈80-150；不知名小宾馆 ≈120-250。
-- **必须考虑入住日期的淡旺季因素**：
-  · 春节、五一、国庆、元旦等法定节假日：价格上浮 50%-150%
-  · 暑期（7-8月）：旅游城市上浮 20%-50%
-  · 淡季（如北方城市冬季）：可下浮 10%-30%
-  · 普通工作日：基准价
-- 价格必须是正整数（>0），不要填 0。
-- 输出顺序必须与输入顺序一致。
-
-【输出格式】只输出一个 JSON 数组，不要任何额外文字、代码块或解释。格式：
-[{{"name": "酒店名", "price_per_night": 268}}, ...]
-
-城市：{city}
-{date_hint}
-酒店列表（来自高德 POI，不含房价）：
-{json.dumps(hotels_brief, ensure_ascii=False, indent=2)}
-"""
+    llm, template, _ = await _llm_for_prompt(
+        "hotel_price", "estimate",
+        model_type="flash",
+        max_tokens=2048,
+        extra_body={"thinking": {"type": "disabled"}},
+    )
+    prompt = render_prompt(
+        template,
+        city=city,
+        date_hint=date_hint,
+        hotels_brief=json.dumps(hotels_brief, ensure_ascii=False, indent=2),
+    )
     priced: List[Dict] = []
     try:
         # 纯 JSON 估价任务无需推理：关闭思维链省掉大量 reasoning token，并设输出上限兜底
-        resp = await _LLM(
-            agent="hotel_price",
-            model_type="flash",
-            max_tokens=2048,
-            extra_body={"thinking": {"type": "disabled"}},
-        ).ainvoke([HumanMessage(content=prompt)])
+        resp = await llm.ainvoke([HumanMessage(content=prompt)])
         content = resp.content.strip()
         # 去掉可能的 ```json ... ``` 包裹
         if content.startswith("```"):
@@ -658,31 +619,23 @@ async def _select_hotel_with_llm(city: str, hotels: List[Dict], route_plan: Dict
     preferences = planner_context.get("preferences", []) or []
     pref_str = ", ".join(preferences) if preferences else "无特别偏好"
 
-    prompt = f"""你是酒店选择专家。请为「以上城市」的行程从以下候选酒店中选择**最合适的一家**。
-
-选择要求（按优先级）：
-1. 位置：优先靠近景点几何中心 / daily_starting_point / 首日出发地 / 多数景点（候选已附距中心距离），减少每天通勤
-2. 价格：每晚价格尽量不超过 per_night_budget；若全部超预算，选最接近上限的
-3. 偏好：契合用户偏好（如靠近地铁/商圈/安静/亲子等，可从酒店名与地址判断）
-
-只输出一个 JSON 对象，不要任何额外文字：
-{{"name": "选中的酒店名称（必须与候选列表完全一致）", "reason": "一句话理由，说明位置与预算契合度"}}
-
-【城市】{city}
-【用户需求】{user_query}
-【用户偏好】{pref_str}
-【酒店预算】共 {nights} 晚，每晚上限约 {per_night_budget:.0f} 元（总 {hotel_budget:.0f} 元）
-
-【候选酒店】
-{hotel_lines}
-
-【每日行程位置线索】
-{chr(10).join(days_info) if days_info else "（无详细行程）"}
-全市统一出发参考点：{daily_starting_point or "（无）"}
-景点几何中心（到各景点距离和最小的参考点，越近越省通勤）：{center or "（未计算）"}
-"""
+    llm, template, _ = await _llm_for_prompt(
+        "hotel_select", "choose", temperature=0.2, extra_body={"thinking": {"type": "disabled"}},
+    )
+    prompt = render_prompt(
+        template,
+        city=city,
+        user_query=user_query,
+        pref_str=pref_str,
+        nights=nights,
+        per_night_budget=f"{per_night_budget:.0f}",
+        hotel_budget=f"{hotel_budget:.0f}",
+        hotel_lines=hotel_lines,
+        days_info=chr(10).join(days_info) if days_info else "（无详细行程）",
+        daily_starting_point=daily_starting_point or "（无）",
+        center=center or "（未计算）",
+    )
     try:
-        llm = _LLM(agent="hotel_select", temperature=0.2, extra_body={"thinking": {"type": "disabled"}})
         structured = llm.with_structured_output(_HotelChoice)
         data: _HotelChoice = await structured.ainvoke([HumanMessage(content=prompt)])
         chosen_name = (data.name or "").strip()
@@ -846,39 +799,22 @@ async def city_budget_allocation_node(state: Dict[str, Any]) -> Dict[str, Any]:
         lock_line = (f"\n注意：以下城市已规划完毕并锁定预算，不在本次分配范围内：{', '.join(keep_done_cities)}"
                      f"（已锁定 {locked_spent:.0f} 元，不计入可分配池）")
 
-    llm = _LLM(agent="budget_alloc", temperature=0.3, extra_body={"thinking": {"type": "disabled"}})
-    prompt = f"""请将旅游预算智能分配到以下每个城市。
-
-分配要求：
-1. 每个城市拆分为：attractions_budget（景点门票+市内交通）、hotel_budget（住宿按夜数合计）
-2. nights：估计在该市住宿夜数（通常 = 游玩天数，不超过 travel_days）
-3. 需要考虑：
-   - 用户偏好（如"高消费/豪华"→酒店多分配）
-   - 城市档次（如三亚/上海/北京 住宿更贵）
-   - 淡旺季（出行日期如果是节假日/暑期，酒店要上浮）
-   - 所有城市的 attractions_budget + hotel_budget 之和，要 ≤ 可分配剩余预算 pool
-4. 建议留 5%~10% 作为 buffer_budget（弹性缓冲，不分配到具体城市）
-
-输出 JSON，不要任何解释。格式：
-{{"city_budgets": [
-  {{"city": "城市名", "attractions_budget": 数字, "hotel_budget": 数字, "nights": 整数, "reasoning": "一句话理由"}},
-  ...
-], "buffer_budget": 数字, "total_allocated": 数字}}
-
-注意：city_budgets 必须按城市列表的顺序，覆盖全部 {len(alloc_cities)} 座城市。
-
-用户查询：{user_query}
-用户偏好：{preferences}
-出行日期：{travel_date or '未指定'}
-总预算：{total_budget:.0f} 元
-交通总花费：{transport_total:.0f} 元
-各段交通明细：
-{transport_lines or '  - （无）'}
-可分配剩余预算（景点+酒店，已扣除锁定花费）：{pool:.0f} 元
-城市列表（共 {len(alloc_cities)} 座，仅需分配这些）：
-{cities_line}
-{lock_line}
-"""
+    llm, template, _ = await _llm_for_prompt(
+        "budget_alloc", "allocate", temperature=0.3, extra_body={"thinking": {"type": "disabled"}},
+    )
+    prompt = render_prompt(
+        template,
+        alloc_count=len(alloc_cities),
+        user_query=user_query,
+        preferences=preferences,
+        travel_date=travel_date or "未指定",
+        total_budget=f"{total_budget:.0f}",
+        transport_total=f"{transport_total:.0f}",
+        transport_lines=transport_lines or "  - （无）",
+        pool=f"{pool:.0f}",
+        cities_line=cities_line,
+        lock_line=lock_line,
+    )
     try:
         structured = llm.with_structured_output(_CityBudgetPlan)
         data: _CityBudgetPlan = await structured.ainvoke([HumanMessage(content=prompt)])

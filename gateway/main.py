@@ -290,6 +290,17 @@ async def admin_versions(_: str = Depends(get_current_admin)) -> List[str]:
     return r.json()
 
 
+@app.get("/admin/releases")
+async def admin_releases(
+    _: str = Depends(get_current_admin),
+    limit: int = Query(50, ge=1, le=200),
+) -> List[Dict[str, Any]]:
+    r = await _require_monitor_client().get("/releases", params={"limit": limit})
+    if r.status_code >= 400:
+        _raise_backend_error(r)
+    return r.json()
+
+
 @app.get("/admin/report/text")
 async def admin_report_text(_: str = Depends(get_current_admin)) -> Response:
     r = await _require_monitor_client().get("/report/text")

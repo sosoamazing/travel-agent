@@ -53,6 +53,12 @@ def list_versions() -> List[str]:
     return analyze.list_versions()
 
 
+@app.get("/releases")
+def list_releases(limit: int = Query(50, ge=1, le=200)) -> List[Dict[str, Any]]:
+    """系统发布清单（改了哪些提示词 / git），仅供管理员查看。"""
+    return analyze.list_releases(limit)
+
+
 @app.get("/tasks")
 def list_tasks(limit: int = Query(50, ge=1, le=500),
                version: Optional[str] = Query(None)) -> List[Dict[str, Any]]:

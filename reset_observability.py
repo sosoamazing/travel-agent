@@ -2,7 +2,7 @@
 
 用途：
 - 清空当前 span 树观测表（含 LLM payload）以及历史遗留 obs_* 表。
-- 不删 prompt_versions（模板目录，不是任务日志）。
+- 不删 prompt_versions / agent_releases（模板目录与发布清单，不是任务日志）。
 - 下次 backend 启动时 _obs_storage._ensure_init 会用 IF NOT EXISTS 自动重建。
 
 运行（在 travel-agent/travel-agent 目录下）：

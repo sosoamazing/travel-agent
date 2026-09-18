@@ -9,18 +9,11 @@ from typing import Optional
 
 from langchain_core.messages import SystemMessage, HumanMessage
 
-from agent_nodes._common import _LLM
-from config.prompt_registry import get_prompt
+from agent_nodes._common import _llm_for_prompt
+from config.prompt_registry import render_prompt
 from config.settings import JSON_FIX_MAX_ATTEMPTS
 
 logger = logging.getLogger(__name__)
-
-# ── 全局 DFS Flash 客户端（模块级单例，复用连接池；走 _LLM 以纳入 token 统计） ──
-_JSON_FIX_PROMPT, _JSON_FIX_VER = get_prompt("json_fix")
-_ds_flash_llm = _LLM(
-    agent="json_fix", model_type="flash",
-    prompt_id="json_fix", prompt_version=_JSON_FIX_VER,
-)
 
 
 def extract_json_block(text: str) -> str:
@@ -89,11 +82,12 @@ async def fix_json_with_flash(
     for attempt in range(1, max_attempts + 1):
         # 用 SystemMessage/HumanMessage 直接构造：schema_hint 常含 JSON 花括号字面量，
         # 走 ChatPromptTemplate 会二次插值报 "unmatched '{' in format spec"（项目硬约束）
+        llm, template, _ = await _llm_for_prompt("json_fix", "system", model_type="flash")
         messages = [
-            SystemMessage(content=_JSON_FIX_PROMPT.replace("{schema_hint}", schema_hint)),
+            SystemMessage(content=render_prompt(template, schema_hint=schema_hint)),
             HumanMessage(content=f"需要修正的内容：\n{last}"),
         ]
-        resp = await _ds_flash_llm.ainvoke(messages)
+        resp = await llm.ainvoke(messages)
 
         content = extract_json_block(resp.content)
         last = content  # 本轮失败则下一轮基于本轮输出再修

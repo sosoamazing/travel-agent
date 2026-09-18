@@ -14,7 +14,8 @@
 |---|---|---|---|
 | 进行中任务状态 / 刚结束的业务结果 | Redis Hash `task:status:{task_id}` | 运行中无 TTL；结束后 TTL 24h | 前端轮询、多实例查状态 |
 | 任务头 + span 树 + 业务结果副本 | PostgreSQL `obs_*` | 长期 | monitor、复盘、Redis miss |
-| 提示词模板 | PostgreSQL `prompt_versions` | 模板变更才新增一行 | 对比版本、回放骨架 |
+| 提示词模板 | PostgreSQL `prompt_versions` | 模板变更才新增一行；agent 每次取最新 | agent 干活 |
+| 系统发布清单 | PostgreSQL `agent_releases` | 管理员显式记录 | 管理端 changelog |
 | 某次调用实际送进模型的内容 | PostgreSQL `obs_llm_payloads` | 随 span | 复盘「当时模型看见了什么」 |
 | SSE token / 进度 | 仍进程内 `asyncio.Queue` | 仅当前执行进程 | 前端 stream |
 
@@ -56,18 +57,21 @@ GET /tasks/{task_id}/events?since_ts={unix_float}
 拆的是「模板」和「这一次渲染结果」，不是「输入 / 输出」两张日志表。
 
 ```
-prompt_versions          目录：prompt_id + version(hash) + 模板正文
-obs_llm_spans            调用元数据：token / 状态 / 时间 / prompt_id+version / output
+prompt_versions          运行时目录：agent + usage + version(hash) + 模板正文
+agent_releases           管理侧清单：发布号 + git + 当时 prompt_set 快照 + note
+obs_llm_spans            调用元数据：token / 状态 / 时间 / prompt_id(agent/usage)+version / output
 obs_llm_payloads         1:1 span_id：渲染后的完整 input（截断）
 ```
 
 - `prompt_versions` 只在模板变更时插入（`ON CONFLICT DO NOTHING`），不随调用膨胀。
-- 版本用内容 hash 前 12 位，不和 `AGENT_VERSION` 绑死。
+- agent 干活：`WHERE agent=? AND usage=? ORDER BY created_at DESC LIMIT 1`。不经过 Redis，不 JOIN `agent_releases`。
+- 版本用内容 hash 前 12 位，不和任务上的 `AGENT_VERSION` 绑死。
+- `agent_releases.prompt_set` 是给人看的快照，不是运行配置。
 - `obs_llm_payloads.span_id` 主键，任务合并仍走 `task_id + parent_id + start_ts`。
 - output 仍在 `obs_llm_spans`，不在 payload 再存一份。
 - input 默认截断 32KB（`LLM_PAYLOAD_MAX_CHARS`）。
 
-节点侧先把静态模板登记进 registry；调用时 `_make_tracked_llm` 自动把 messages 序列化进 payload。未走 registry 的调用 `prompt_id` 可空，正文照样落库，后面再慢慢把 f-string 抽出来。
+独立写入：`insert_prompt.py` 插模板；`record_release.py` 记发布。代码 registry 只做空库种子。
 
 ---
 
@@ -129,11 +133,11 @@ Kafka 适合多消费者、长时间留存、十万级事件/秒。这里每版�
 
 ## 6. 本阶段落地清单
 
-1. PG：`prompt_versions`、`obs_llm_payloads`、`obs_tasks.result_payload`、增量索引
-2. 提示词 registry + LLM 调用自动记 input
+1. PG：`prompt_versions(agent,usage,version,content)`、`agent_releases`、`obs_llm_payloads`、`obs_tasks.result_payload`、增量索引
+2. 提示词 registry 作种子；运行时从库取最新；LLM 调用自动记 input
 3. Redis 任务快照双写，结束后 TTL；结果落 PG
 4. `GET /tasks/{task_id}/events?since_ts=`
 5. compose 增加 Redis；`REDIS_URL` 未配置则跳过 Redis
 6. **不上** Kafka / RabbitMQ / Redis Streams 调度
 
-后续可调：把剩余节点 f-string 抽进 registry、SSE 改 Pub/Sub、再评估 Redis Streams 调度。
+后续可调：SSE 改 Pub/Sub、再评估 Redis Streams 调度。
